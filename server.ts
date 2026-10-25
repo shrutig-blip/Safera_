@@ -5,8 +5,32 @@ import fs from 'fs';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
+import { v2 as cloudinary } from 'cloudinary';
 
 dotenv.config({ quiet: true });
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+function uploadEncryptedToCloudinary(buffer: Buffer, id: string, context: Record<string, string>) {
+  return new Promise<any>((resolve, reject) => {
+    cloudinary.uploader
+      .upload_stream(
+        {
+          resource_type: 'raw',
+          folder: 'safera/evidence',
+          public_id: id,
+          tags: ['safera-evidence'],
+          context,
+        } as any,
+        (err, result) => (err ? reject(err) : resolve(result))
+      )
+      .end(buffer);
+  });
+}
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -563,7 +587,7 @@ interface EvidenceRecord {
 // this goes to production.
 const evidenceIndex = new Map<string, EvidenceRecord>();
 
-app.post('/api/evidence/upload', (req, res) => {
+app.post('/api/evidence/upload', async (req, res) => {
   try {
     const { fileName, mimeType, encryptedBase64, ivBase64, sha256Hash, capturedAt, lat, lng } = req.body || {};
 
@@ -573,27 +597,64 @@ app.post('/api/evidence/upload', (req, res) => {
 
     const id = crypto.randomUUID();
     const cipherBuffer = Buffer.from(encryptedBase64, 'base64');
-    fs.writeFileSync(path.join(EVIDENCE_DIR, `${id}.enc`), cipherBuffer);
-    fs.writeFileSync(path.join(EVIDENCE_DIR, `${id}.iv`), Buffer.from(ivBase64, 'base64'));
+    const safeName = (typeof fileName === 'string' ? fileName : `evidence-${id}.enc`).replace(/[|=]/g, '_');
+    const capturedIso = typeof capturedAt === 'string' ? capturedAt : new Date().toISOString();
+
+    const cld = await uploadEncryptedToCloudinary(cipherBuffer, id, {
+      iv: Buffer.from(ivBase64, 'base64').toString('hex'),
+      sha256: sha256Hash,
+      mime: typeof mimeType === 'string' ? mimeType : 'video/webm',
+      capturedAt: capturedIso,
+      lat: typeof lat === 'number' ? String(lat) : '',
+      lng: typeof lng === 'number' ? String(lng) : '',
+      name: safeName,
+    });
 
     const record: EvidenceRecord = {
       id,
-      fileName: typeof fileName === 'string' ? fileName : `evidence-${id}.enc`,
+      fileName: safeName,
       mimeType: typeof mimeType === 'string' ? mimeType : 'video/webm',
       sha256Hash,
-      capturedAt: typeof capturedAt === 'string' ? capturedAt : new Date().toISOString(),
+      capturedAt: capturedIso,
       lat: typeof lat === 'number' ? lat : null,
       lng: typeof lng === 'number' ? lng : null,
       storedAt: new Date().toISOString(),
     };
     evidenceIndex.set(id, record);
 
-    return res.status(201).json({ id, sizeBytes: cipherBuffer.length, storedAt: record.storedAt });
+    return res.status(201).json({
+      id,
+      sizeBytes: cipherBuffer.length,
+      storedAt: record.storedAt,
+      cloudinaryUrl: cld.secure_url,
+      publicId: cld.public_id,
+    });
   } catch (error: any) {
     console.error('Error in evidence upload:', error);
     return res.status(500).json({ error: error.message || 'Evidence upload failed' });
   }
 });
+app.get('/api/evidence', async (_req, res) => {
+  try {
+    const r = await cloudinary.api.resources_by_tag('safera-evidence', {
+      resource_type: 'raw',
+      context: true,
+      max_results: 100,
+    });
+    res.json(
+      r.resources.map((x: any) => ({
+        id: x.public_id,
+        url: x.secure_url,
+        bytes: x.bytes,
+        createdAt: x.created_at,
+        ...(x.context?.custom ?? x.context ?? {}),
+      }))
+    );
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {

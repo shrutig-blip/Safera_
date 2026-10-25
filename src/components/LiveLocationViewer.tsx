@@ -208,7 +208,7 @@ export const LiveLocationViewer: React.FC<{ sessionId: string }> = ({ sessionId 
               <MapContainer center={[session.lat, session.lng]} zoom={16} style={{ height: '100%', width: '100%' }} dragging scrollWheelZoom doubleClickZoom touchZoom zoomControl>
                 <TileLayer
                   attribution="&copy; OpenStreetMap contributors &copy; CARTO"
-                  url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+                  url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
                   subdomains="abcd"
                   maxZoom={19}
                 />

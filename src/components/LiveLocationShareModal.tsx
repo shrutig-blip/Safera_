@@ -339,7 +339,7 @@ export const LiveLocationShareModal: React.FC<LiveLocationShareModalProps> = ({
                 >
                   <TileLayer
                     attribution="&copy; OpenStreetMap contributors &copy; CARTO"
-                    url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+                    url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
                     subdomains="abcd"
                     maxZoom={19}
                   />
