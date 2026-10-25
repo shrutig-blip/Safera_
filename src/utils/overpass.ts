@@ -31,13 +31,25 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
 ];
 
-async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<Response> {
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal?.aborted) {
+    abortFromCaller();
+  } else {
+    signal?.addEventListener('abort', abortFromCaller, { once: true });
+  }
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', abortFromCaller);
   }
 }
 
@@ -122,9 +134,13 @@ async function queryOnce(
   endpoint: string,
   lat: number,
   lng: number,
-  radiusMeters: number
+  radiusMeters: number,
+  signal?: AbortSignal,
 ): Promise<{ elements: OverpassElement[] } | 'timeout' | 'rate-limited' | 'network-blocked'> {
   try {
+    if (signal?.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    }
     const response = await fetchWithTimeout(
       endpoint,
       {
@@ -132,7 +148,8 @@ async function queryOnce(
         headers: { 'Content-Type': 'text/plain' },
         body: buildQuery(lat, lng, radiusMeters),
       },
-      20000
+      20000,
+      signal,
     );
 
     if (response.status === 429) return 'rate-limited';
@@ -141,7 +158,8 @@ async function queryOnce(
     return await response.json();
   } catch (err) {
     const isAbort = err instanceof DOMException && err.name === 'AbortError';
-    console.error(`Overpass fetch failed for ${endpoint}`, err);
+    if (signal?.aborted) throw err;
+    if (!isAbort) console.error(`Overpass fetch failed for ${endpoint}`, err);
     return isAbort ? 'timeout' : 'network-blocked';
   }
 }
@@ -183,11 +201,12 @@ function selectDiversePlaces(places: OverpassPlace[]): OverpassPlace[] {
 export async function fetchNearbyPlaces(
   lat: number,
   lng: number,
-  radiusMeters = 5000
+  radiusMeters = 5000,
+  signal?: AbortSignal,
 ): Promise<NearbyPlacesResult> {
   const tryRadius = async (radius: number): Promise<NearbyPlacesResult | null> => {
     for (const endpoint of OVERPASS_ENDPOINTS) {
-      const result = await queryOnce(endpoint, lat, lng, radius);
+      const result = await queryOnce(endpoint, lat, lng, radius, signal);
 
       if (result === 'timeout' || result === 'network-blocked' || result === 'rate-limited') {
         continue; // try the next mirror
@@ -204,6 +223,7 @@ export async function fetchNearbyPlaces(
   };
 
   const firstAttempt = await tryRadius(radiusMeters);
+  if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
   if (!firstAttempt) return { places: [], status: 'network-blocked' };
 
   // Fewer than 5 total real places is a sign this specific radius is too
@@ -211,6 +231,7 @@ export async function fetchNearbyPlaces(
   // rather than showing an almost-empty grid.
   if (firstAttempt.places.length < 5 && radiusMeters < 12000) {
     const widerAttempt = await tryRadius(Math.max(radiusMeters * 2, 8000));
+    if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
     if (widerAttempt && widerAttempt.places.length > firstAttempt.places.length) {
       return widerAttempt;
     }

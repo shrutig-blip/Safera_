@@ -22,6 +22,7 @@ import {
   Info,
   X,
   ShieldCheck,
+  AlertTriangle,
 } from 'lucide-react';
 
 import { LiveLocationShareModal } from './LiveLocationShareModal';
@@ -57,13 +58,21 @@ const fetchWithTimeout = async (
   url: string,
   options: RequestInit,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<Response> => {
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal?.aborted) {
+    abortFromCaller();
+  } else {
+    signal?.addEventListener('abort', abortFromCaller, { once: true });
+  }
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
+    signal?.removeEventListener('abort', abortFromCaller);
   }
 };
 
@@ -133,6 +142,11 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
   const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+    let nearbyController: AbortController | null = null;
+    let nearbyPlacesTimer: ReturnType<typeof setTimeout> | undefined;
+    const lifecycleController = new AbortController();
+
     if (!navigator.geolocation) {
       setLiveLocationLabel('Location unavailable');
       setLiveWeatherDesc('Unavailable');
@@ -143,6 +157,7 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
+        if (cancelled) return;
         const { latitude, longitude } = pos.coords;
         setUserCoords({ lat: latitude, lng: longitude });
         let weatherDescLocal = 'Clear';
@@ -152,18 +167,21 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
         // calls below so a slow one doesn't block the others. Hard-capped
         // at 25s total (on top of fetchNearbyPlaces' own internal 20s/mirror
         // timeouts) so the UI can NEVER get stuck on "Finding real police
-        // stations..." forever — it always resolves to the mock fallback
-        // within a bounded time if something unexpected happens.
+        // stations..." forever — and the request is cancelled when we fall
+        // back or the component unmounts.
         let nearbyPlacesTimedOut = false;
-        const nearbyPlacesTimer = setTimeout(() => {
+        nearbyController = new AbortController();
+        nearbyPlacesTimer = setTimeout(() => {
+          if (cancelled) return;
           nearbyPlacesTimedOut = true;
+          nearbyController?.abort();
           console.warn('Nearby places fetch exceeded 25s hard timeout — falling back to demo locations');
           setLiveLocationsStatus('network-blocked');
         }, 25000);
 
-        fetchNearbyPlaces(latitude, longitude, 5000)
+        fetchNearbyPlaces(latitude, longitude, 5000, nearbyController.signal)
           .then((result) => {
-            if (nearbyPlacesTimedOut) return; // already fell back — don't flip state late
+            if (cancelled || nearbyPlacesTimedOut) return; // already fell back — don't flip state late
             clearTimeout(nearbyPlacesTimer);
             if (result.status === 'live' && result.places.length > 0) {
               setLiveLocations(placesToSafetyLocations(result.places, latitude, longitude));
@@ -175,7 +193,7 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
             }
           })
           .catch((err) => {
-            if (nearbyPlacesTimedOut) return;
+            if (cancelled || nearbyPlacesTimedOut) return;
             clearTimeout(nearbyPlacesTimer);
             console.error('Nearby places fetch failed', err);
             setLiveLocationsStatus('network-blocked');
@@ -186,16 +204,21 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
             `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,weather_code`,
             {},
             6000,
+            lifecycleController.signal,
           );
           if (!weatherRes.ok) throw new Error(`weather responded ${weatherRes.status}`);
           const weatherData = await weatherRes.json();
+          if (cancelled) return;
           weatherDescLocal = getWeatherLabel(weatherData.current.weather_code);
           setLiveTemp(`${Math.round(weatherData.current.temperature_2m)}°`);
           setLiveWeatherDesc(weatherDescLocal);
         } catch (err) {
-          console.error('Weather fetch failed', err);
-          setLiveWeatherDesc('Unavailable');
+          if (!cancelled) {
+            console.error('Weather fetch failed', err);
+            setLiveWeatherDesc('Unavailable');
+          }
         }
+        if (cancelled) return;
 
         let readableName = 'Your current area';
         try {
@@ -203,9 +226,11 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
             `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}`,
             {},
             6000,
+            lifecycleController.signal,
           );
           if (!geoRes.ok) throw new Error(`reverse geocode responded ${geoRes.status}`);
           const geoData = await geoRes.json();
+          if (cancelled) return;
           const addr = geoData.address || {};
           readableName =
             addr.road ||
@@ -215,9 +240,12 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
             'Your current area';
           setLiveLocationLabel(readableName);
         } catch (err) {
-          console.error('Reverse geocode failed', err);
-          setLiveLocationLabel(readableName);
+          if (!cancelled) {
+            console.error('Reverse geocode failed', err);
+            setLiveLocationLabel(readableName);
+          }
         }
+        if (cancelled) return;
 
         try {
           const hour = new Date().getHours();
@@ -245,10 +273,12 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
               }),
             },
             6000,
+            lifecycleController.signal,
           );
 
           if (!riskRes.ok) throw new Error(`predict-risk responded ${riskRes.status}`);
           const riskData = await riskRes.json();
+          if (cancelled) return;
 
           if (
             typeof riskData.safetyScore === 'number' &&
@@ -260,11 +290,14 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
             throw new Error('predict-risk returned an unexpected shape');
           }
         } catch (err) {
-          console.error('Live risk score failed, falling back to demo location score', err);
-          setLiveScoreStatus('fallback');
+          if (!cancelled) {
+            console.error('Live risk score failed, falling back to demo location score', err);
+            setLiveScoreStatus('fallback');
+          }
         }
       },
       (err) => {
+        if (cancelled) return;
         console.warn('Geolocation permission denied/unavailable', err);
         setLiveLocationLabel('Location permission denied');
         setLiveWeatherDesc('Enable location for live weather');
@@ -272,6 +305,13 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
         setLiveLocationsStatus('no-gps');
       },
     );
+
+    return () => {
+      cancelled = true;
+      lifecycleController.abort();
+      nearbyController?.abort();
+      if (nearbyPlacesTimer) clearTimeout(nearbyPlacesTimer);
+    };
   }, []);
 
   const displaySafetyScore =
@@ -372,7 +412,7 @@ export const SafetyMap: React.FC<SafetyMapProps> = ({
           lightingStars: loc.lightingStars,
           cctvPercent: loc.cctvPercent,
           policeDistanceMeters: loc.policeDistanceMeters,
-          seedSafetyScore: loc.safetyScore,
+          safetyScore: loc.safetyScore,
           dataSource: loc.dataSource,
           placeType: loc.placeType,
         }),

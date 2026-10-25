@@ -61,6 +61,11 @@ npm install
 npm run dev
 ```
 
+The development server runs Express and Vite together on port 3000, so API
+requests use the same origin. If you run Vite separately on port 5173, its
+`/api` requests are proxied to `http://localhost:3000` by default; set
+`SAFERA_API_TARGET` if the local Express server uses a different address.
+
 ## Build
 
 ```bash

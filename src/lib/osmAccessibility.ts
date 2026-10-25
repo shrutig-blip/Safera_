@@ -15,6 +15,14 @@
  */
 
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+const CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 10;
+
+const accessiblePlacesCache = new Map<
+  string,
+  { expiresAt: number; places: AccessiblePlace[] }
+>();
+const accessiblePlacesInFlight = new Map<string, Promise<AccessiblePlace[]>>();
 
 export interface AccessiblePlace {
   id: string;
@@ -74,7 +82,7 @@ function tagToTriState(value: string | undefined): boolean | undefined {
  * accessibility tags. Also fetches nearby police/toilet/surveillance/phone
  * nodes (even unnamed ones) so per-place proximity can be computed.
  */
-export async function fetchNearbyAccessiblePlaces(
+async function fetchNearbyAccessiblePlacesUncached(
   lat: number,
   lng: number,
   radiusMeters = 2000,
@@ -189,4 +197,44 @@ export async function fetchNearbyAccessiblePlaces(
   }
 
   return results;
+}
+
+export function fetchNearbyAccessiblePlaces(
+  lat: number,
+  lng: number,
+  radiusMeters = 2000,
+  limit = 40,
+  timeoutMs = 12000
+): Promise<AccessiblePlace[]> {
+  const cacheKey = JSON.stringify([lat, lng, radiusMeters, limit, timeoutMs]);
+  const cached = accessiblePlacesCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return Promise.resolve(cached.places);
+  }
+  if (cached) accessiblePlacesCache.delete(cacheKey);
+
+  const inFlight = accessiblePlacesInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const request = fetchNearbyAccessiblePlacesUncached(lat, lng, radiusMeters, limit, timeoutMs)
+    .then((places) => {
+      for (const [key, entry] of accessiblePlacesCache) {
+        if (entry.expiresAt <= Date.now()) accessiblePlacesCache.delete(key);
+      }
+      accessiblePlacesCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, places });
+      while (accessiblePlacesCache.size > MAX_CACHE_ENTRIES) {
+        const oldestKey = accessiblePlacesCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        accessiblePlacesCache.delete(oldestKey);
+      }
+      return places;
+    })
+    .finally(() => {
+      if (accessiblePlacesInFlight.get(cacheKey) === request) {
+        accessiblePlacesInFlight.delete(cacheKey);
+      }
+    });
+
+  accessiblePlacesInFlight.set(cacheKey, request);
+  return request;
 }

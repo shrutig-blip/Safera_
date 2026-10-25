@@ -3,6 +3,7 @@ import { Navbar } from './components/Navbar';
 import { LandingPage } from './components/LandingPage';
 import { AuthPage } from './components/AuthPage';
 import { SafetyMap } from './components/SafetyMap';
+import { SafetyMapErrorBoundary } from './components/SafetyMapErrorBoundary';
 import { RouteGenerator } from './components/RouteGenerator';
 import { AccessibilityMapper } from './components/AccessibilityMapper';
 import { MovementDetection } from './components/MovementDetection';
@@ -210,13 +211,15 @@ export default function App() {
         {/* Main Workspace Container */}
         <main className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
           {activeTab === 'map' && (
-            <SafetyMap
-              locations={locations}
-              reports={reports}
-              onSelectLocationForRoute={handleSelectLocationForRoute}
-              onOpenReportModal={() => setActiveTab('community')}
-              setActiveTab={setActiveTab}
-            />
+            <SafetyMapErrorBoundary>
+              <SafetyMap
+                locations={locations}
+                reports={reports}
+                onSelectLocationForRoute={handleSelectLocationForRoute}
+                onOpenReportModal={() => setActiveTab('community')}
+                setActiveTab={setActiveTab}
+              />
+            </SafetyMapErrorBoundary>
           )}
 
           {activeTab === 'routes' && (
