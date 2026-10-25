@@ -1,0 +1,6 @@
+{
+  "name": "Safera Safety & Accessibility",
+  "description": "AI-powered safety mapper, safest route generator, accessibility finder, SOS triggers, evidence vault, and AI legal rights advisor.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
