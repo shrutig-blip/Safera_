@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import crypto from 'crypto';
@@ -6,7 +7,8 @@ import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import { v2 as cloudinary } from 'cloudinary';
-
+import { registerCloudinaryEvidenceRoutes } from './cloudinaryEvidence';
+import { registerAutoAlertRoutes } from './autoAlert';
 dotenv.config({ quiet: true });
 
 cloudinary.config({
@@ -40,6 +42,7 @@ const PORT = Number(process.env.PORT) || 3000;
 // /api/evidence/upload below, and 10mb was too small for more than a few
 // seconds of footage.
 app.use(express.json({ limit: '50mb' }));
+registerCloudinaryEvidenceRoutes(app);
 
 // Helper to initialize Gemini SDK safely
 function getGeminiClient() {
@@ -231,16 +234,15 @@ Return a clean JSON object ONLY, matching this exact schema:
   "nearbySafeResourceNote": "<1 sentence pointing to the nearest safe resource given above, or noting none is logged>"
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-      }
-    });
-
     let parsed: any;
     try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.6-flash',
+        contents: prompt,
+        config: {
+           responseMimeType: 'application/json',
+        }
+      });
       parsed = JSON.parse(response.text || '{}');
       if (typeof parsed.safetyScore !== 'number' || typeof parsed.summary !== 'string' || !parsed.summary.trim()) {
         throw new Error('Gemini response missing required fields');
@@ -556,6 +558,12 @@ app.post('/api/live-location/:id/stop', (req, res) => {
   return res.json(session);
 });
 
+registerAutoAlertRoutes(app, {
+  getLiveLocation: (id) => {
+    const s = liveLocationSessions.get(id);
+    return s && s.active ? { lat: s.lat, lng: s.lng } : undefined;
+  },
+});
 // Encrypted Evidence Vault storage
 //
 // The client (useEvidenceRecorder.ts) encrypts every recording with
