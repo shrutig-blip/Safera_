@@ -77,6 +77,7 @@ export default function App() {
   const setIsOffline = (val: boolean) => setForceOfflineDemo(val);
 
   const [isSosOpen, setIsSosOpen] = useState(false);
+  const [autoDispatchSos, setAutoDispatchSos] = useState(false);
   const [selectedRouteTarget, setSelectedRouteTarget] = useState<SafetyLocation | undefined>(undefined);
 
   const handleAddEvidence = (item: EvidenceItem) => {
@@ -103,7 +104,10 @@ export default function App() {
     confirmSafe,
     triggerSafetyCheck,
     dispatchNow,
-  } = useMotionSafetyDetection(sensorSettings, () => setIsSosOpen(true));
+  } = useMotionSafetyDetection(sensorSettings, () => {
+    setAutoDispatchSos(true);
+    setIsSosOpen(true);
+  });
 
   const handleAddReport = (newReport: CommunityReport) => {
     setReports((prev) => [newReport, ...prev]);
@@ -302,6 +306,8 @@ export default function App() {
       <SosDialog
         isOpen={isSosOpen}
         onClose={() => setIsSosOpen(false)}
+        autoDispatch={autoDispatchSos}
+        onAutoDispatchHandled={() => setAutoDispatchSos(false)}
         contacts={contacts}
         onAddContact={handleAddContact}
         onDeleteContact={handleDeleteContact}

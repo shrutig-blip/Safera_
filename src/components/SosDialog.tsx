@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { EmergencyContact } from '../types';
 import { GuardIaLogo } from './GuardIaLogo';
 import {
@@ -21,6 +21,8 @@ import { getBestEffortLocation, buildSosMessage, buildSmsLinks, SosCoords } from
 interface SosDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  autoDispatch: boolean;
+  onAutoDispatchHandled: () => void;
   contacts: EmergencyContact[];
   onAddContact: (contact: EmergencyContact) => void;
   onDeleteContact: (id: string) => void;
@@ -35,6 +37,8 @@ interface SosDialogProps {
 export const SosDialog: React.FC<SosDialogProps> = ({
   isOpen,
   onClose,
+  autoDispatch,
+  onAutoDispatchHandled,
   contacts,
   onAddContact,
   onDeleteContact,
@@ -46,6 +50,9 @@ export const SosDialog: React.FC<SosDialogProps> = ({
   const [dispatchStage, setDispatchStage] = useState<'idle' | 'countdown' | 'dispatched'>('idle');
   const [cancelSeconds, setCancelSeconds] = useState(5);
   const [powerButtonClicks, setPowerButtonClicks] = useState(0);
+  const [alertDelivery, setAlertDelivery] = useState<{ status: 'sending' | 'sent' | 'failed'; message: string } | null>(null);
+  const alertRequestStarted = useRef(false);
+  const autoDispatchStarted = useRef(false);
 
   // Real dispatch data — populated as soon as dispatch starts, so it's
   // ready by the time the cancel countdown finishes.
@@ -88,9 +95,67 @@ export const SosDialog: React.FC<SosDialogProps> = ({
     return () => clearTimeout(timer);
   }, [dispatchStage, cancelSeconds]);
 
-  const triggerSosDispatch = () => {
+  useEffect(() => {
+    if (dispatchStage !== 'dispatched' || locationPending || alertRequestStarted.current) return;
+    alertRequestStarted.current = true;
+
+    const smsContacts = contacts
+      .filter((contact) => contact.sendSms && contact.phone?.trim())
+      .map((contact) => ({
+        name: contact.name,
+        phone: contact.phone.replace(/[^\d+]/g, ''),
+      }))
+      .filter((contact) => /^\+[1-9]\d{7,14}$/.test(contact.phone));
+
+    if (smsContacts.length === 0) {
+      setAlertDelivery({ status: 'failed', message: 'No valid SMS-enabled contacts are available for automatic sending.' });
+      return;
+    }
+
+    setAlertDelivery({ status: 'sending', message: 'Sending emergency alert to your contacts…' });
+    void fetch('/api/alert/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason: 'sos',
+        name: 'A Safera user',
+        lat: coords?.lat,
+        lng: coords?.lng,
+        liveSessionId,
+        liveViewUrl: liveUrl,
+        contacts: smsContacts,
+      }),
+    })
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Alert delivery failed');
+
+        const deliveries = Array.isArray(result.results) ? result.results : [];
+        const sent = deliveries.filter((delivery: { ok?: boolean; channel?: string }) => delivery.ok && delivery.channel !== 'dry-run').length;
+        const simulated = deliveries.some((delivery: { ok?: boolean; channel?: string }) => delivery.ok && delivery.channel === 'dry-run');
+
+        if (simulated) {
+          setAlertDelivery({ status: 'failed', message: 'Dry-run mode is enabled; no messages were sent.' });
+        } else if (sent > 0) {
+          setAlertDelivery({
+            status: 'sent',
+            message: `Automatic alert sent to ${sent} of ${smsContacts.length} contact${smsContacts.length === 1 ? '' : 's'}.`,
+          });
+        } else {
+          setAlertDelivery({ status: 'failed', message: 'Automatic sending failed. Use the manual SMS option below.' });
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Automatic SOS alert failed:', error);
+        setAlertDelivery({ status: 'failed', message: 'Could not send automatically. Use the manual SMS option below.' });
+      });
+  }, [dispatchStage, locationPending, contacts, coords, liveSessionId, liveUrl]);
+
+  const triggerSosDispatch = (immediate = false) => {
+    alertRequestStarted.current = false;
+    setAlertDelivery(null);
     setCancelSeconds(5);
-    setDispatchStage('countdown');
+    setDispatchStage(immediate ? 'dispatched' : 'countdown');
     setCoords(null);
     setLiveUrl(null);
     setLiveSessionId(null);
@@ -108,13 +173,11 @@ export const SosDialog: React.FC<SosDialogProps> = ({
     setLocationPending(true);
     getBestEffortLocation().then(async (bestCoords) => {
       setCoords(bestCoords);
-      setLocationPending(false);
 
       let url: string | undefined;
 
-      // Only attempt the backend when we actually have a connection —
-      // offline, we skip straight to the SMS fallback (Nightingale's core
-      // pattern: SMS goes out over cellular signal with zero data needed).
+      // Only attempt live tracking when connected. The automatic alert is
+      // sent after this completes so it can include the location and link.
       if (!isOffline && bestCoords) {
         try {
           const res = await fetch('/api/live-location/start', {
@@ -139,8 +202,23 @@ export const SosDialog: React.FC<SosDialogProps> = ({
       }
 
       setSmsLinks(buildSmsLinks(contacts, buildSosMessage(bestCoords, url)));
-    });
+    }).catch((error: unknown) => {
+      console.error('Could not prepare SOS location:', error);
+      setCoords(null);
+      setSmsLinks(buildSmsLinks(contacts, buildSosMessage(null)));
+    }).finally(() => setLocationPending(false));
   };
+
+  useEffect(() => {
+    if (!autoDispatch) {
+      autoDispatchStarted.current = false;
+      return;
+    }
+    if (!isOpen || autoDispatchStarted.current) return;
+    autoDispatchStarted.current = true;
+    onAutoDispatchHandled();
+    triggerSosDispatch(true);
+  }, [isOpen, autoDispatch, onAutoDispatchHandled]);
 
   const handleCancelSos = () => {
     setDispatchStage('idle');
@@ -226,7 +304,20 @@ export const SosDialog: React.FC<SosDialogProps> = ({
               </div>
             )}
 
-            {coords ? (
+            {alertDelivery && (
+              <p
+                role="status"
+                className={`text-xs text-center font-semibold ${
+                  alertDelivery.status === 'failed' ? 'text-[#A70F43]' : 'text-[#7B7280]'
+                }`}
+              >
+                {alertDelivery.message}
+              </p>
+            )}
+
+            {locationPending ? (
+              <p className="text-xs text-[#7B7280] text-center">Preparing your location for the alert…</p>
+            ) : coords ? (
               <div className="flex items-center gap-1.5 text-xs text-[#7B7280] justify-center">
                 <MapPin className="w-3.5 h-3.5 text-[#A70F43]" />
                 <span>
@@ -256,7 +347,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
 
             <div className="space-y-1.5 pt-1">
               <p className="text-[11px] font-bold text-[#7B7280] uppercase tracking-wide">
-                Tap to send SMS ({smsLinks.length} of {contacts.length} contacts have SMS enabled)
+                Manual SMS backup ({smsLinks.length} of {contacts.length} contacts have SMS enabled)
               </p>
               {smsLinks.length === 0 && (
                 <p className="text-xs text-[#7B7280]">
