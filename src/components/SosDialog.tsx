@@ -18,6 +18,15 @@ import {
 } from 'lucide-react';
 import { getBestEffortLocation, buildSosMessage, buildSmsLinks, SosCoords } from '../utils/sos';
 
+/** Turns "98765 43210", "09876543210", "91 98765 43210" or "+91 98765 43210" into E.164 (+919876543210). */
+function toE164(raw: string): string {
+  const cleaned = raw.replace(/[^\d+]/g, '');
+  if (cleaned.startsWith('+')) return cleaned;
+  const digits = cleaned.replace(/^0+/, '');
+  if (/^\d{10}$/.test(digits)) return `+91${digits}`; // bare Indian mobile number
+  return `+${digits}`;
+}
+
 interface SosDialogProps {
   isOpen: boolean;
   onClose: () => void;
@@ -66,6 +75,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
   const [newContactName, setNewContactName] = useState('');
   const [newContactPhone, setNewContactPhone] = useState('');
   const [newContactRelation, setNewContactRelation] = useState('Family');
+  const [newContactTelegram, setNewContactTelegram] = useState('');
 
   // Power Button 4-Click Simulation Timer
   useEffect(() => {
@@ -99,16 +109,23 @@ export const SosDialog: React.FC<SosDialogProps> = ({
     if (dispatchStage !== 'dispatched' || locationPending || alertRequestStarted.current) return;
     alertRequestStarted.current = true;
 
-    const smsContacts = contacts
-      .filter((contact) => contact.sendSms && contact.phone?.trim())
-      .map((contact) => ({
-        name: contact.name,
-        phone: contact.phone.replace(/[^\d+]/g, ''),
-      }))
-      .filter((contact) => /^\+[1-9]\d{7,14}$/.test(contact.phone));
+    // Each contact can be reached by SMS (valid phone + SMS enabled) and/or Telegram (chat ID).
+    const alertContacts = contacts
+      .map((contact) => {
+        const phone = contact.sendSms && contact.phone?.trim() ? toE164(contact.phone) : undefined;
+        return {
+          name: contact.name,
+          phone: phone && /^\+[1-9]\d{7,14}$/.test(phone) ? phone : undefined,
+          telegramChatId: contact.telegramChatId?.trim() || undefined,
+        };
+      })
+      .filter((contact) => contact.phone || contact.telegramChatId);
 
-    if (smsContacts.length === 0) {
-      setAlertDelivery({ status: 'failed', message: 'No valid SMS-enabled contacts are available for automatic sending.' });
+    if (alertContacts.length === 0) {
+      setAlertDelivery({
+        status: 'failed',
+        message: 'No contact has a valid phone number (+91...) or Telegram chat ID for automatic sending.',
+      });
       return;
     }
 
@@ -123,26 +140,36 @@ export const SosDialog: React.FC<SosDialogProps> = ({
         lng: coords?.lng,
         liveSessionId,
         liveViewUrl: liveUrl,
-        contacts: smsContacts,
+        contacts: alertContacts,
       }),
     })
       .then(async (response) => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || 'Alert delivery failed');
 
-        const deliveries = Array.isArray(result.results) ? result.results : [];
-        const sent = deliveries.filter((delivery: { ok?: boolean; channel?: string }) => delivery.ok && delivery.channel !== 'dry-run').length;
-        const simulated = deliveries.some((delivery: { ok?: boolean; channel?: string }) => delivery.ok && delivery.channel === 'dry-run');
+        type Delivery = { ok?: boolean; channel?: string; contact?: string; error?: string };
+        const deliveries: Delivery[] = Array.isArray(result.results) ? result.results : [];
+        const real = deliveries.filter((d) => d.ok && d.channel !== 'dry-run');
+        const reached = new Set(real.map((d) => d.contact)).size;
+        const channels = [...new Set(real.map((d) => d.channel))].join(' + ');
+        const simulated = deliveries.some((d) => d.ok && d.channel === 'dry-run');
 
-        if (simulated) {
-          setAlertDelivery({ status: 'failed', message: 'Dry-run mode is enabled; no messages were sent.' });
-        } else if (sent > 0) {
+        if (real.length > 0) {
           setAlertDelivery({
             status: 'sent',
-            message: `Automatic alert sent to ${sent} of ${smsContacts.length} contact${smsContacts.length === 1 ? '' : 's'}.`,
+            message: `Automatic alert sent to ${reached} of ${alertContacts.length} contact${alertContacts.length === 1 ? '' : 's'} (${channels}).`,
+          });
+        } else if (simulated) {
+          setAlertDelivery({
+            status: 'failed',
+            message: 'Server has no messaging channel configured (dry-run); no messages were sent.',
           });
         } else {
-          setAlertDelivery({ status: 'failed', message: 'Automatic sending failed. Use the manual SMS option below.' });
+          const firstError = deliveries.find((d) => !d.ok && d.error)?.error;
+          setAlertDelivery({
+            status: 'failed',
+            message: `Automatic sending failed${firstError ? ` (${firstError})` : ''}. Use the manual SMS option below.`,
+          });
         }
       })
       .catch((error: unknown) => {
@@ -389,7 +416,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
         {/* Primary 1-Press SOS Action */}
         <div className="text-center py-1 space-y-2">
           <button
-            onClick={triggerSosDispatch}
+            onClick={() => triggerSosDispatch()}
             className="w-full py-4 rounded-2xl bg-[#A70F43] hover:bg-[#8D0D39] text-white font-black text-lg shadow-md active:scale-95 transition-all flex items-center justify-center gap-2.5 border border-[#8D0D39]"
           >
             <AlertTriangle className="w-7 h-7 fill-white text-[#A70F43] animate-pulse" />
@@ -419,7 +446,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
 
           {/* Voice Command Listener */}
           <button
-            onClick={triggerSosDispatch}
+            onClick={() => triggerSosDispatch()}
             className="p-3 rounded-xl bg-[#FFF8F9] border border-[#E9D8DE] hover:border-[#A70F43] text-left space-y-1 transition-all"
           >
             <div className="flex items-center justify-between">
@@ -434,7 +461,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
 
           {/* Gesture Trigger Simulator */}
           <button
-            onClick={triggerSosDispatch}
+            onClick={() => triggerSosDispatch()}
             className="p-3 rounded-xl bg-[#FFF8F9] border border-[#E9D8DE] hover:border-[#A70F43] text-left space-y-1 transition-all"
           >
             <div className="flex items-center justify-between">
@@ -475,7 +502,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
 
                 <div className="flex items-center space-x-2">
                   <span className="text-[9px] text-[#A70F43] bg-[#FFF0F3] px-2 py-0.5 rounded border border-[#E9D8DE] font-semibold">
-                    SMS Ready
+                    {contact.telegramChatId ? 'SMS + Telegram' : 'SMS Ready'}
                   </span>
                   {!contact.isPrimary && (
                     <button
@@ -491,7 +518,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
           </div>
 
           {/* Add New Contact Form */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 pt-1 text-xs">
             <input
               type="text"
               placeholder="Contact Name"
@@ -506,6 +533,13 @@ export const SosDialog: React.FC<SosDialogProps> = ({
               onChange={(e) => setNewContactPhone(e.target.value)}
               className="bg-[#FFF8F9] border border-[#E9D8DE] rounded-xl px-3 py-1.5 text-[#2F2B2D] focus:outline-none focus:border-[#A70F43]"
             />
+            <input
+              type="text"
+              placeholder="Telegram chat ID (optional)"
+              value={newContactTelegram}
+              onChange={(e) => setNewContactTelegram(e.target.value.trim())}
+              className="bg-[#FFF8F9] border border-[#E9D8DE] rounded-xl px-3 py-1.5 text-[#2F2B2D] focus:outline-none focus:border-[#A70F43]"
+            />
             <button
               onClick={() => {
                 if (newContactName && newContactPhone) {
@@ -516,9 +550,11 @@ export const SosDialog: React.FC<SosDialogProps> = ({
                     phone: newContactPhone,
                     isPrimary: false,
                     sendSms: true,
+                    telegramChatId: newContactTelegram || undefined,
                   });
                   setNewContactName('');
                   setNewContactPhone('');
+                  setNewContactTelegram('');
                 }
               }}
               className="bg-[#A70F43] hover:bg-[#8D0D39] text-white font-bold py-1.5 px-3 rounded-xl flex items-center justify-center gap-1 transition-colors border border-[#8D0D39]"
