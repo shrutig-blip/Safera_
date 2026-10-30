@@ -67,6 +67,10 @@ function osmScoreAdjust(o: OsmFacts, dark: boolean): number {
   return d;
 }
 
+// Scores within 5 points are treated as tied — a 2-point gap is noise, not a
+// real safety difference, so the shorter walk should win those ties.
+const scoreBucket = (c: { safetyScore: number }) => Math.floor(c.safetyScore / 5);
+
 export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
   locations,
   reports,
@@ -190,7 +194,7 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
         }
         if (o.policeCount > 0) {
           c.highlights.push(
-            `${o.policeCount} police station${o.policeCount > 1 ? "s" : ""} within 400 m of the route (nearest ${o.nearestPoliceMeters} m)`,
+            `${o.policeCount} police station${o.policeCount > 1 ? "s" : ""} or post${o.policeCount > 1 ? "s" : ""} within 400 m of the route (nearest ${o.nearestPoliceMeters} m)`,
           );
         }
         if (o.mainRoadShare !== null && o.mainRoadShare >= 0.5) {
@@ -207,7 +211,7 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
           c.highlights.push(`About ${Math.round(o.lampsPerKm)} mapped streetlights per km`);
         }
         if (o.stairCount === 0 && o.stepFreePercent !== null) {
-          c.highlights.push("No staircases found on this route");
+          c.highlights.push("No staircases mapped on this route");
         }
 
         // things to know (real findings only)
@@ -226,13 +230,21 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
         c.riskSegments = [...warnings, ...c.riskSegments];
       });
 
-      // Cards backed by logged data or OpenStreetMap rank by score; a route
-      // with neither ranks after them, and ties fall back to the shorter walk.
+      // Ranking. Cards backed by logged data or OpenStreetMap rank by score
+      // (in 5-point buckets, so near-ties go to the shorter walk); a route
+      // with neither ranks after them. In wheelchair mode, routes without
+      // mapped stairs always come first.
+      const wheelchair = transportMode === "Wheelchair / Assistive";
       const isMeasured = (c: RouteCard) => !c.insufficientData || c.osmChecked;
+      const hasStairs = (c: RouteCard) => c.accessibilityKnown && c.accessibilityScore < 100;
+
       cards.sort((a, b) => {
+        if (wheelchair && hasStairs(a) !== hasStairs(b)) {
+          return hasStairs(a) ? 1 : -1;
+        }
         if (isMeasured(a) !== isMeasured(b)) return isMeasured(a) ? -1 : 1;
-        if (isMeasured(a) && b.safetyScore !== a.safetyScore) {
-          return b.safetyScore - a.safetyScore;
+        if (isMeasured(a) && scoreBucket(a) !== scoreBucket(b)) {
+          return scoreBucket(b) - scoreBucket(a);
         }
         return a.distanceMeters - b.distanceMeters;
       });
@@ -242,11 +254,17 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
       ).id;
       cards.forEach((c, i) => {
         if (i === 0) {
-          c.tag = c.insufficientData
-            ? c.osmChecked
-              ? "Best estimated score"
-              : "Shortest · limited safety data"
-            : "Highest safety score";
+          if (wheelchair && c.accessibilityKnown && !hasStairs(c)) {
+            c.tag = "Best step-free route";
+          } else if (c.insufficientData) {
+            c.tag = !c.osmChecked
+              ? "Shortest · limited safety data"
+              : cards.length > 1 && scoreBucket(cards[1]) === scoreBucket(c)
+                ? "Similar safety · shortest"
+                : "Best estimated score";
+          } else {
+            c.tag = "Highest safety score";
+          }
         } else {
           c.tag = c.id === shortestId ? "Shortest" : "Alternate";
         }
@@ -255,7 +273,11 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
       setRoutes(cards);
       setActiveRouteId(cards[0].id);
 
-      if (cards.length === 1) {
+      if (wheelchair && cards.every((c) => hasStairs(c))) {
+        setMapError(
+          "Every route found has at least one staircase (often a footbridge or underpass). No fully step-free option was found between these points.",
+        );
+      } else if (cards.length === 1) {
         setMapError(
           "Only one distinct walking path was found between these points — showing a single verified route rather than fabricated alternatives.",
         );
@@ -561,7 +583,7 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
             <Navigation className="w-4 h-4 text-[#A70F43]" />
             Directions · {selectedRoute.name}
           </h3>
-          <ol className="space-y-2 text-xs text-[#221F20]">
+          <ol className="space-y-2 text-xs text-[#221F20] max-h-72 overflow-y-auto pr-2">
             {selectedRoute.steps.map((s, i) => (
               <li
                 key={i}
@@ -596,7 +618,7 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
             {routes.map((route) => {
               const isSelected = route.id === activeRouteId;
               const isHighSafety = !route.insufficientData && route.safetyScore >= 90;
-              const showBars = route.lightingKnown || route.accessibilityKnown;
+              const noStairs = route.accessibilityScore >= 100;
 
               return (
                 <div
@@ -641,7 +663,7 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
                       </span>
                     </div>
 
-                    {showBars && (
+                    {(route.lightingKnown || route.accessibilityKnown) && (
                       <div className="space-y-2.5 text-xs">
                         {route.lightingKnown && (
                           <div>
@@ -664,13 +686,19 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
                           <div>
                             <div className="flex justify-between text-[11px] text-[#6E676A] mb-1">
                               <span>Step-Free Accessibility</span>
-                              <span className="text-[#221F20] font-bold">
-                                {route.accessibilityScore}%
+                              <span
+                                className={`font-bold ${
+                                  noStairs ? "text-[#3F8A5C]" : "text-amber-700"
+                                }`}
+                              >
+                                {noStairs ? "No stairs mapped" : "Has stairs"}
                               </span>
                             </div>
                             <div className="w-full bg-[#FEFCFA] border border-[#EFE6E1] h-2 rounded-full overflow-hidden">
                               <div
-                                className="bg-[#5FA777] h-full rounded-full transition-all"
+                                className={`h-full rounded-full transition-all ${
+                                  noStairs ? "bg-[#5FA777]" : "bg-amber-400"
+                                }`}
                                 style={{ width: `${route.accessibilityScore}%` }}
                               ></div>
                             </div>
@@ -679,18 +707,12 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
                       </div>
                     )}
 
-                    {!route.lightingKnown && (
-                      <p className="mt-3 text-[11px] text-[#6E676A]">
-                        Streetlight coverage isn’t mapped for this area yet.
-                      </p>
-                    )}
-
-                    <div className="mt-4 space-y-1.5 text-xs text-[#221F20]">
-                      <span className="text-[11px] font-semibold text-[#6E676A]">
-                        Safety Features:
-                      </span>
-                      {route.highlights.length > 0 ? (
-                        route.highlights.map((h, idx) => (
+                    {route.highlights.length > 0 && (
+                      <div className="mt-4 space-y-1.5 text-xs text-[#221F20]">
+                        <span className="text-[11px] font-semibold text-[#6E676A]">
+                          Safety Features:
+                        </span>
+                        {route.highlights.map((h, idx) => (
                           <div
                             key={idx}
                             className="flex items-start gap-1.5 text-[#221F20]"
@@ -698,13 +720,9 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
                             <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[#5FA777]" />
                             <span>{h}</span>
                           </div>
-                        ))
-                      ) : (
-                        <p className="text-[11px] text-[#6E676A]">
-                          No safety features found near this route.
-                        </p>
-                      )}
-                    </div>
+                        ))}
+                      </div>
+                    )}
 
                     {route.riskSegments && route.riskSegments.length > 0 && (
                       <div className="mt-4 p-3 rounded-[16px] bg-amber-50/80 border border-amber-200 space-y-1 text-xs">
@@ -720,12 +738,11 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
                       </div>
                     )}
 
-                    <p className="mt-3 text-[10px] text-[#6E676A]">
-                      {route.osmChecked
-                        ? "Checked against OpenStreetMap"
-                        : "OpenStreetMap data unavailable"}
-                      {" · "}logged safety data near {route.dataCoverage}% of route
-                    </p>
+                    {!route.osmChecked && (
+                      <p className="mt-3 text-[10px] text-[#6E676A]">
+                        Live map data didn’t load for this route, so this score is a rough estimate.
+                      </p>
+                    )}
                   </div>
 
                   <button
@@ -750,13 +767,21 @@ export const RouteGenerator: React.FC<RouteGeneratorProps> = ({
             })}
           </div>
 
-          {routes.some((r) => r.insufficientData) && (
-            <p className="text-[11px] text-[#6E676A] text-center">
-              “Est.” scores are estimated from OpenStreetMap road types, nearby public
-              places and police stations. They become measured scores as more
-              locations and community reports are logged along the route.
-            </p>
-          )}
+          <div className="text-[11px] text-[#6E676A] text-center space-y-1">
+            {routes.some((r) => r.insufficientData) && (
+              <p>
+                “Est.” scores are estimated from OpenStreetMap road types, nearby
+                public places and police stations. They become measured scores as
+                more locations and community reports are logged along the route.
+              </p>
+            )}
+            {routes.some((r) => r.osmChecked) && routes.every((r) => !r.lightingKnown) && (
+              <p>
+                Streetlight data isn’t tagged in OpenStreetMap for this area, so
+                lighting isn’t part of these scores.
+              </p>
+            )}
+          </div>
         </>
       )}
     </div>
