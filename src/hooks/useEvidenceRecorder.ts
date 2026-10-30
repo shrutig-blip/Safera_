@@ -11,6 +11,7 @@ const CANVAS_FPS = 30;
 
 export interface EvidenceRecorderState {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  activePreviewStream: MediaStream | null;
   isRecording: boolean;
   isSaving: boolean;
   recordSeconds: number;
@@ -26,6 +27,8 @@ export interface EvidenceRecorderState {
   startRecording: () => Promise<void>;
   /** Stops capture, encrypts the result, uploads it, and saves it to the vault. */
   stopRecording: () => Promise<void>;
+  /** Safely attaches the active preview stream to any video element */
+  attachPreview: (element: HTMLVideoElement | null) => void;
 }
 
 /**
@@ -52,6 +55,7 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
   const [isDualCamera, setIsDualCamera] = useState(false);
   const [recordingCoords, setRecordingCoords] = useState<SosCoords | null>(null);
   const [recordingLocationName, setRecordingLocationName] = useState<string | null>(null);
+  const [activePreviewStream, setActivePreviewStream] = useState<MediaStream | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -90,6 +94,20 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     return () => clearInterval(interval);
   }, [isRecording]);
 
+    // Keep videoRef in sync with activePreviewStream whenever it mounts or changes
+  useEffect(() => {
+    if (videoRef.current && activePreviewStream && videoRef.current.srcObject !== activePreviewStream) {
+      videoRef.current.srcObject = activePreviewStream;
+      void videoRef.current.play().catch(() => {});
+    }
+  }, [activePreviewStream]);
+
+  const cleanupSourceEl = (el: HTMLVideoElement | null) => {
+    if (el?.parentElement) {
+      el.parentElement.removeChild(el);
+    }
+  };
+
   const stopAllTracks = (stream: MediaStream | null) => {
     stream?.getTracks().forEach((track) => track.stop());
   };
@@ -108,33 +126,56 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     primaryStreamRef.current = null;
     canvasStreamRef.current = null;
     recordingStreamRef.current = null;
+    cleanupSourceEl(rearVideoElRef.current);
+    cleanupSourceEl(frontVideoElRef.current);
     rearVideoElRef.current = null;
     frontVideoElRef.current = null;
     canvasRef.current = null;
     setIsDualCamera(false);
+    setActivePreviewStream(null);
   };
 
-  const countVideoInputs = async (): Promise<number> => {
+  const getAvailableVideoDevices = async (): Promise<MediaDeviceInfo[]> => {
     try {
-      if (!navigator.mediaDevices?.enumerateDevices) return 1;
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      return devices.filter((d) => d.kind === 'videoinput').length;
+      if (!navigator.mediaDevices?.enumerateDevices) return [];
+      let devices = await navigator.mediaDevices.enumerateDevices();
+      let videoDevices = devices.filter((d) => d.kind === 'videoinput');
+
+      // If devices list is empty or labels/deviceIds are masked (permission not yet granted),
+      // probe permission with a quick getUserMedia call so the full device list is exposed.
+      if (videoDevices.length === 0 || videoDevices.every((d) => !d.deviceId && !d.label)) {
+        try {
+          const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          devices = await navigator.mediaDevices.enumerateDevices();
+          videoDevices = devices.filter((d) => d.kind === 'videoinput');
+          probe.getTracks().forEach((t) => t.stop());
+        } catch (e) {
+          console.log('Camera permission probe failed:', e);
+        }
+      }
+      return videoDevices;
     } catch {
-      return 1; // if we can't tell, assume single-camera and let the dual attempt fail gracefully anyway
+      return [];
     }
   };
 
-  /** Builds a hidden, playing <video> element sourced from a given stream, used only as a canvas draw source. */
+  /** Builds an offscreen, playing <video> element attached to the DOM so mobile browsers decode frames. */
   const makeSourceVideoEl = (stream: MediaStream): HTMLVideoElement => {
     const el = document.createElement('video');
     el.srcObject = stream;
-    el.muted = true; // never let these play audio out loud — audio is carried separately on the recording stream
+    el.muted = true;
     el.playsInline = true;
     el.autoplay = true;
-    void el.play().catch(() => {
-      // Autoplay can be blocked before a user gesture on some browsers;
-      // the draw loop just skips frames until playback actually starts.
-    });
+    // Attach to DOM offscreen so Safari/WebKit and Chrome don't throttle or suspend decoding
+    el.style.position = 'fixed';
+    el.style.left = '-9999px';
+    el.style.top = '-9999px';
+    el.style.width = '1px';
+    el.style.height = '1px';
+    el.style.opacity = '0';
+    el.style.pointerEvents = 'none';
+    document.body.appendChild(el);
+    void el.play().catch(() => {});
     return el;
   };
 
@@ -189,20 +230,41 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
    * of throwing, since a timeout here just means "this camera didn't pan
    * out" — not a hard error.
    */
-  const waitForLiveFrames = (el: HTMLVideoElement, track: MediaStreamTrack, timeoutMs: number): Promise<boolean> => {
+  const waitForLiveFrames = (el: HTMLVideoElement, track: MediaStreamTrack, timeoutMs = 3500): Promise<boolean> => {
     return new Promise((resolve) => {
       const start = Date.now();
+      let resolved = false;
+
+      const finish = (result: boolean) => {
+        if (!resolved) {
+          resolved = true;
+          el.removeEventListener('loadeddata', onReady);
+          el.removeEventListener('timeupdate', onReady);
+          resolve(result);
+        }
+      };
+
+      const onReady = () => {
+        if (el.readyState >= 2 && el.videoWidth > 0 && !track.muted && track.readyState === 'live') {
+          finish(true);
+        }
+      };
+
+      el.addEventListener('loadeddata', onReady);
+      el.addEventListener('timeupdate', onReady);
+
       const poll = () => {
+        if (resolved) return;
         if (track.readyState === 'ended') {
-          resolve(false);
+          finish(false);
           return;
         }
         if (el.readyState >= 2 && el.videoWidth > 0 && !track.muted) {
-          resolve(true);
+          finish(true);
           return;
         }
         if (Date.now() - start > timeoutMs) {
-          resolve(false);
+          finish(false);
           return;
         }
         requestAnimationFrame(poll);
@@ -225,30 +287,67 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
    * everything down and let the caller fall back to single-camera mode.
    */
   const tryStartDualCamera = async (): Promise<MediaStream | null> => {
-    const inputCount = await countVideoInputs();
-    if (inputCount < 2) return null;
+    const videoDevices = await getAvailableVideoDevices();
+    if (videoDevices.length < 2) {
+      console.log(`Only ${videoDevices.length} video input device(s) found, skipping dual camera.`);
+      return null;
+    }
+
+    // Identify rear (environment) and front (user) cameras
+    let rearDevice = videoDevices.find((d) => /back|rear|environment/i.test(d.label));
+    let frontDevice = videoDevices.find((d) => /front|user|selfie|face/i.test(d.label));
+
+    if (!rearDevice && !frontDevice) {
+      rearDevice = videoDevices[0];
+      frontDevice = videoDevices[1];
+    } else if (!rearDevice) {
+      rearDevice = videoDevices.find((d) => d.deviceId !== frontDevice?.deviceId) || videoDevices[0];
+    } else if (!frontDevice) {
+      frontDevice = videoDevices.find((d) => d.deviceId !== rearDevice?.deviceId) || videoDevices[1];
+    }
 
     let rearStream: MediaStream;
     try {
       rearStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { exact: 'environment' } },
+        video: rearDevice?.deviceId
+          ? { deviceId: { exact: rearDevice.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: true,
       });
     } catch (err) {
-      console.log('Rear camera unavailable for dual capture:', err);
-      return null;
+      console.log('Rear camera with specific constraints failed, retrying with ideal environment:', err);
+      try {
+        rearStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } },
+          audio: true,
+        });
+      } catch (err2) {
+        console.log('Rear camera unavailable for dual capture:', err2);
+        return null;
+      }
     }
 
     let frontStream: MediaStream;
     try {
       frontStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { exact: 'user' } },
-        audio: false, // single shared audio track (from the rear stream) avoids echo/double-mic issues
+        video: frontDevice?.deviceId
+          ? { deviceId: { exact: frontDevice.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
+          : { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false,
       });
     } catch (err) {
-      console.log('Front camera unavailable for dual capture, falling back to single camera:', err);
-      stopAllTracks(rearStream);
-      return null;
+      console.log('Front camera with specific constraints failed, retrying with ideal user:', err);
+      try {
+        frontStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'user' } },
+          audio: false,
+        });
+      } catch (err2) {
+        console.log('Front camera unavailable for dual capture, falling back to single camera:', err2);
+        cleanupSourceEl(rearEl);
+        stopAllTracks(rearStream);
+        return null;
+      }
     }
 
     const rearEl = makeSourceVideoEl(rearStream);
@@ -258,18 +357,17 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     const frontTrack = frontStream.getVideoTracks()[0];
 
     // Warm-up: confirm both cameras are genuinely delivering frames
-    // simultaneously before treating this as real dual capture. On a
-    // device that can only run one camera at a time, this is where that
-    // gets caught — rearTrack goes muted/ended once frontStream opens.
     const [rearLive, frontLive] = await Promise.all([
-      waitForLiveFrames(rearEl, rearTrack, 1500),
-      waitForLiveFrames(frontEl, frontTrack, 1500),
+      waitForLiveFrames(rearEl, rearTrack, 3500),
+      waitForLiveFrames(frontEl, frontTrack, 3500),
     ]);
 
     if (!rearLive || !frontLive) {
       console.log(
-        `Dual camera warm-up failed (rear live: ${rearLive}, front live: ${frontLive}) — this device likely only supports one active camera stream. Falling back to single camera.`,
+        `Dual camera warm-up failed (rear live: ${rearLive}, front live: ${frontLive}) — device may only support one active camera stream. Falling back to single camera.`,
       );
+      cleanupSourceEl(rearEl);
+      cleanupSourceEl(frontEl);
       stopAllTracks(rearStream);
       stopAllTracks(frontStream);
       return null;
@@ -280,12 +378,9 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     rearVideoElRef.current = rearEl;
     frontVideoElRef.current = frontEl;
 
-    // Keep watching after commit: if the OS reclaims a camera mid-recording
-    // (some devices allow a brief dual window before enforcing exclusivity),
-    // at least surface it loudly instead of silently recording a dead frame.
-    rearTrack.addEventListener('mute', () => console.warn('Rear camera track muted mid-recording — device may have reclaimed the camera.'));
+    rearTrack.addEventListener('mute', () => console.warn('Rear camera track muted mid-recording.'));
     rearTrack.addEventListener('ended', () => console.warn('Rear camera track ended mid-recording.'));
-    frontTrack.addEventListener('mute', () => console.warn('Front camera track muted mid-recording — device may have reclaimed the camera.'));
+    frontTrack.addEventListener('mute', () => console.warn('Front camera track muted mid-recording.'));
     frontTrack.addEventListener('ended', () => console.warn('Front camera track ended mid-recording.'));
 
     const canvas = document.createElement('canvas');
@@ -304,7 +399,7 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
       ...(audioTrack ? [audioTrack] : []),
     ]);
 
-    // Live preview shows the actual composited picture-in-picture feed.
+    setActivePreviewStream(canvasStream);
     if (videoRef.current) videoRef.current.srcObject = canvasStream;
 
     setIsDualCamera(true);
@@ -316,10 +411,11 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     try {
       if (!navigator.mediaDevices?.getUserMedia) return null;
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: recordType === 'video' ? { facingMode: cameraMode === 'front' ? 'user' : 'environment' } : false,
+        video: recordType === 'video' ? { facingMode: { ideal: cameraMode === 'front' ? 'user' : 'environment' } } : false,
         audio: true,
       });
       primaryStreamRef.current = stream;
+      setActivePreviewStream(stream);
       if (videoRef.current) videoRef.current.srcObject = stream;
       setIsDualCamera(false);
       return stream;
@@ -342,10 +438,11 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
       try {
         if (!navigator.mediaDevices?.getUserMedia) return null;
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: mode === 'front' ? 'user' : 'environment' },
+          video: { facingMode: { ideal: mode === 'front' ? 'user' : 'environment' } },
           audio: true,
         });
         primaryStreamRef.current = stream;
+        setActivePreviewStream(stream);
         if (videoRef.current) videoRef.current.srcObject = stream;
         setCameraMode(mode);
         setIsDualCamera(false);
@@ -511,8 +608,18 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
   // (which closes over current state) without needing it in a dependency array.
   stopRecordingRef.current = stopRecording;
 
+  const attachPreview = (element: HTMLVideoElement | null) => {
+    if (!element) return;
+    const stream = canvasStreamRef.current || primaryStreamRef.current;
+    if (stream && element.srcObject !== stream) {
+      element.srcObject = stream;
+      void element.play().catch(() => {});
+    }
+  };
+
   return {
     videoRef,
+    activePreviewStream,
     isRecording,
     isSaving,
     recordSeconds,
@@ -525,5 +632,6 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     recordingLocationName,
     startRecording,
     stopRecording,
+    attachPreview,
   };
 }

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { EmergencyContact } from '../types';
+import { EvidenceRecorderState } from '../hooks/useEvidenceRecorder';
 import { GuardIaLogo } from './GuardIaLogo';
 import {
   AlertTriangle,
@@ -15,6 +16,7 @@ import {
   X,
   MessageSquareText,
   MapPin,
+  Camera,
 } from 'lucide-react';
 import { getBestEffortLocation, buildSosMessage, buildSmsLinks, SosCoords } from '../utils/sos';
 
@@ -41,6 +43,7 @@ interface SosDialogProps {
   /** Stops, encrypts, and uploads whatever was captured. */
   onStopRecording: () => void;
   isRecording: boolean;
+  recorder?: EvidenceRecorderState;
 }
 
 export const SosDialog: React.FC<SosDialogProps> = ({
@@ -55,6 +58,7 @@ export const SosDialog: React.FC<SosDialogProps> = ({
   onStartRecording,
   onStopRecording,
   isRecording,
+  recorder,
 }) => {
   const [dispatchStage, setDispatchStage] = useState<'idle' | 'countdown' | 'dispatched'>('idle');
   const [cancelSeconds, setCancelSeconds] = useState(5);
@@ -317,17 +321,57 @@ export const SosDialog: React.FC<SosDialogProps> = ({
             </div>
 
             {isRecording && (
-              <div className="flex items-center justify-between gap-2 bg-white border border-[#E9D8DE] rounded-xl px-3 py-2">
-                <span className="flex items-center gap-1.5 text-xs font-bold text-[#A70F43]">
-                  <span className="w-2 h-2 rounded-full bg-[#A70F43] animate-pulse" />
-                  Encrypted evidence recording in progress
-                </span>
-                <button
-                  onClick={onStopRecording}
-                  className="text-[10px] font-bold text-[#A70F43] hover:underline"
-                >
-                  Stop & Save to Vault
-                </button>
+              <div className="bg-white border border-[#E9D8DE] rounded-2xl p-3.5 space-y-2.5 shadow-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#A70F43] animate-pulse" />
+                    <span className="text-xs font-bold text-[#A70F43]">
+                      Evidence Recording ({recorder ? `00:${recorder.recordSeconds < 10 ? '0' + recorder.recordSeconds : recorder.recordSeconds}` : 'Active'})
+                    </span>
+                    {recorder?.isDualCamera ? (
+                      <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-2 py-0.5 rounded border border-emerald-300 flex items-center gap-1">
+                        <Camera className="w-3 h-3 text-emerald-700" />
+                        DUAL CAM (REAR + FRONT PiP)
+                      </span>
+                    ) : (
+                      <span className="text-[10px] bg-amber-100 text-amber-800 font-extrabold px-2 py-0.5 rounded border border-amber-300 flex items-center gap-1">
+                        <Camera className="w-3 h-3 text-amber-700" />
+                        SINGLE CAM
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={onStopRecording}
+                    className="text-[10px] font-bold text-[#A70F43] hover:underline"
+                  >
+                    Stop & Save to Vault
+                  </button>
+                </div>
+
+                {/* Live Video Preview in SOS Dialog */}
+                <div className="relative w-full h-44 bg-neutral-900 rounded-xl overflow-hidden flex items-center justify-center border border-[#E9D8DE]">
+                  <video
+                    ref={(el) => {
+                      if (el && recorder?.activePreviewStream && el.srcObject !== recorder.activePreviewStream) {
+                        el.srcObject = recorder.activePreviewStream;
+                        void el.play().catch(() => {});
+                      }
+                    }}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute top-2 left-2 px-2 py-0.5 bg-black/70 backdrop-blur-sm rounded text-[9px] font-mono text-white flex items-center gap-1.5 z-10">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
+                    <span>REC • {recorder?.isDualCamera ? 'DUAL ANGLE COMPOSITED' : 'ACTIVE'}</span>
+                  </div>
+                  {recorder?.isDualCamera && (
+                    <div className="absolute bottom-2 right-2 px-2 py-0.5 bg-black/70 backdrop-blur-sm rounded text-[9px] font-mono text-emerald-300 z-10 border border-emerald-500/30">
+                      FRONT PiP + REAR FULL
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

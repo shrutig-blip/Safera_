@@ -40,7 +40,16 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
     recordingCoords,
     startRecording,
     stopRecording,
+    isDualCamera,
+    activePreviewStream,
   } = recorder;
+
+  useEffect(() => {
+    if (videoRef.current && activePreviewStream && videoRef.current.srcObject !== activePreviewStream) {
+      videoRef.current.srcObject = activePreviewStream;
+      void videoRef.current.play().catch(() => {});
+    }
+  }, [videoRef, activePreviewStream]);
 
   const [isLocked, setIsLocked] = useState(true);
   const [pinInput, setPinInput] = useState('');
@@ -137,13 +146,25 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
               <Camera className="w-4 h-4 text-[#A70F43]" />
               Live Evidence Capture HUD
             </span>
-            <button
-              onClick={() => setCameraMode(cameraMode === 'front' ? 'rear' : 'front')}
-              className="px-2.5 py-1 rounded-lg bg-[#FFF8F9] border border-[#E9D8DE] text-[#2F2B2D] hover:bg-[#FFF0F3] text-[10px] font-semibold flex items-center gap-1"
-            >
-              <RefreshCw className="w-3 h-3 text-[#A70F43]" />
-              <span>{cameraMode === 'front' ? 'Front Cam' : 'Rear Cam'}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              {isDualCamera ? (
+                <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold border border-emerald-300 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                  DUAL CAM (PiP)
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-md bg-[#FFF0F3] text-[#A70F43] text-[10px] font-bold border border-[#E9D8DE]">
+                  SINGLE CAM
+                </span>
+              )}
+              <button
+                onClick={() => setCameraMode(cameraMode === 'front' ? 'rear' : 'front')}
+                className="px-2.5 py-1 rounded-lg bg-[#FFF8F9] border border-[#E9D8DE] text-[#2F2B2D] hover:bg-[#FFF0F3] text-[10px] font-semibold flex items-center gap-1"
+              >
+                <RefreshCw className="w-3 h-3 text-[#A70F43]" />
+                <span>{cameraMode === 'front' ? 'Front Cam' : 'Rear Cam'}</span>
+              </button>
+            </div>
           </div>
 
           {/* Camera Stream Viewport Container */}

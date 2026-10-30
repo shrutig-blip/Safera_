@@ -315,6 +315,7 @@ export default function App() {
         onStartRecording={evidenceRecorder.startRecording}
         onStopRecording={evidenceRecorder.stopRecording}
         isRecording={evidenceRecorder.isRecording}
+        recorder={evidenceRecorder}
       />
 
       {/* Footer */}
