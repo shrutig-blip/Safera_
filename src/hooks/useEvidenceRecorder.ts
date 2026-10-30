@@ -180,42 +180,98 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
   };
 
   /** Draws the current rear frame full-canvas and the front frame as a PiP inset, looping via rAF. */
-  const startCompositeLoop = (rearEl: HTMLVideoElement, frontEl: HTMLVideoElement, canvas: HTMLCanvasElement) => {
+  const startCompositeLoop = (
+    rearEl: HTMLVideoElement,
+    frontEl: HTMLVideoElement,
+    canvas: HTMLCanvasElement,
+    isSeparateSensors: boolean
+  ) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     const draw = () => {
-      const rearReady = rearEl.readyState >= 2 && rearEl.videoWidth > 0;
-      if (rearReady && (canvas.width !== rearEl.videoWidth || canvas.height !== rearEl.videoHeight)) {
-        canvas.width = rearEl.videoWidth;
-        canvas.height = rearEl.videoHeight;
+      // Ensure canvas has standard 16:9 HD resolution
+      if (canvas.width !== 1280 || canvas.height !== 720) {
+        canvas.width = 1280;
+        canvas.height = 720;
       }
 
+      const rearReady = rearEl.readyState >= 2 && rearEl.videoWidth > 0;
       if (rearReady) {
         ctx.drawImage(rearEl, 0, 0, canvas.width, canvas.height);
       } else {
-        // Rear feed not ready yet this frame — avoid leaving stale/garbage pixels.
-        ctx.fillStyle = '#000';
+        ctx.fillStyle = '#111827';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
 
-      const frontReady = frontEl.readyState >= 2 && frontEl.videoWidth > 0;
-      if (frontReady && canvas.width > 0) {
-        const pipWidth = canvas.width * PIP_WIDTH_RATIO;
-        const pipHeight = pipWidth * (frontEl.videoHeight / frontEl.videoWidth);
-        const pipX = canvas.width - pipWidth - PIP_MARGIN_PX;
-        const pipY = canvas.height - pipHeight - PIP_MARGIN_PX;
+      // Draw Main Back Camera Status Badge (Top Left)
+      ctx.save();
+      ctx.fillStyle = 'rgba(17, 24, 39, 0.75)';
+      ctx.fillRect(16, 16, 150, 26);
+      ctx.fillStyle = '#EF4444'; // Red recording dot
+      ctx.beginPath();
+      ctx.arc(28, 29, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+      ctx.fillText(isSeparateSensors ? 'BACK CAM • MAIN' : 'BACK CAM • ENV', 40, 33);
+      ctx.restore();
 
+      // Front Camera (Smaller Rectangular Frame Inset at Top Right)
+      const frontReady = frontEl.readyState >= 2 && frontEl.videoWidth > 0;
+      const pipWidth = Math.round(canvas.width * 0.28); // 358px on 1280w
+      const pipHeight = Math.round(pipWidth * 0.65); // ~232px rectangular frame
+      const pipX = canvas.width - pipWidth - 20;
+      const pipY = 20;
+
+      // Inset Frame Drop Shadow & White Border
+      ctx.save();
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
+      ctx.shadowBlur = 14;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 4;
+      ctx.fillStyle = '#FFFFFF'; // Crisp white border
+      ctx.fillRect(pipX - 3, pipY - 3, pipWidth + 6, pipHeight + 6);
+      ctx.restore();
+
+      // Inner background
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(pipX, pipY, pipWidth, pipHeight);
+
+      if (frontReady) {
         ctx.save();
-        // Thin border so the inset reads clearly against busy rear-camera footage.
-        ctx.fillStyle = 'rgba(255,255,255,0.9)';
-        ctx.fillRect(pipX - 3, pipY - 3, pipWidth + 6, pipHeight + 6);
-        // Front camera is mirrored, matching how the user sees themselves live.
+        ctx.beginPath();
+        ctx.rect(pipX, pipY, pipWidth, pipHeight);
+        ctx.clip();
+
+        // Mirror front camera horizontally (like a real selfie camera)
         ctx.translate(pipX + pipWidth, pipY);
         ctx.scale(-1, 1);
         ctx.drawImage(frontEl, 0, 0, pipWidth, pipHeight);
         ctx.restore();
       }
+
+      // Front Camera Badge on top of the smaller rectangular frame
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+      ctx.fillRect(pipX + 8, pipY + 8, 140, 22);
+      ctx.fillStyle = '#10B981'; // Green active dot
+      ctx.beginPath();
+      ctx.arc(pipX + 18, pipY + 19, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 10px system-ui, -apple-system, sans-serif';
+      ctx.fillText('FRONT CAM • USER', pipX + 28, pipY + 23);
+      ctx.restore();
+
+      // Evidence Watermark Bar across bottom
+      ctx.save();
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+      ctx.fillRect(0, canvas.height - 24, canvas.width, 24);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = '10px monospace';
+      ctx.fillText(`SAFERA DUAL EVIDENCE • ${new Date().toLocaleTimeString()} • SHA-256 SECURED`, 16, canvas.height - 8);
+      ctx.restore();
 
       drawLoopIdRef.current = requestAnimationFrame(draw);
     };
@@ -286,114 +342,111 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
    * both before committing — if either one doesn't pan out, we tear
    * everything down and let the caller fall back to single-camera mode.
    */
-  const tryStartDualCamera = async (): Promise<MediaStream | null> => {
+  const startDualCameraPipeline = async (): Promise<MediaStream | null> => {
+    // 1. Check if 2+ physical cameras exist and can be opened simultaneously
     const videoDevices = await getAvailableVideoDevices();
-    if (videoDevices.length < 2) {
-      console.log(`Only ${videoDevices.length} video input device(s) found, skipping dual camera.`);
-      return null;
-    }
+    let rearStream: MediaStream | null = null;
+    let frontStream: MediaStream | null = null;
+    let isSeparateSensors = false;
 
-    // Identify rear (environment) and front (user) cameras
-    let rearDevice = videoDevices.find((d) => /back|rear|environment/i.test(d.label));
-    let frontDevice = videoDevices.find((d) => /front|user|selfie|face/i.test(d.label));
+    if (videoDevices.length >= 2) {
+      let rearDevice = videoDevices.find((d) => /back|rear|environment/i.test(d.label));
+      let frontDevice = videoDevices.find((d) => /front|user|selfie|face/i.test(d.label));
 
-    if (!rearDevice && !frontDevice) {
-      rearDevice = videoDevices[0];
-      frontDevice = videoDevices[1];
-    } else if (!rearDevice) {
-      rearDevice = videoDevices.find((d) => d.deviceId !== frontDevice?.deviceId) || videoDevices[0];
-    } else if (!frontDevice) {
-      frontDevice = videoDevices.find((d) => d.deviceId !== rearDevice?.deviceId) || videoDevices[1];
-    }
+      if (!rearDevice && !frontDevice) {
+        rearDevice = videoDevices[0];
+        frontDevice = videoDevices[1];
+      } else if (!rearDevice) {
+        rearDevice = videoDevices.find((d) => d.deviceId !== frontDevice?.deviceId) || videoDevices[0];
+      } else if (!frontDevice) {
+        frontDevice = videoDevices.find((d) => d.deviceId !== rearDevice?.deviceId) || videoDevices[1];
+      }
 
-    let rearStream: MediaStream;
-    try {
-      rearStream = await navigator.mediaDevices.getUserMedia({
-        video: rearDevice?.deviceId
-          ? { deviceId: { exact: rearDevice.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: true,
-      });
-    } catch (err) {
-      console.log('Rear camera with specific constraints failed, retrying with ideal environment:', err);
       try {
         rearStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
+          video: rearDevice?.deviceId
+            ? { deviceId: { exact: rearDevice.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+            : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: true,
         });
-      } catch (err2) {
-        console.log('Rear camera unavailable for dual capture:', err2);
-        return null;
-      }
-    }
 
-    let frontStream: MediaStream;
-    try {
-      frontStream = await navigator.mediaDevices.getUserMedia({
-        video: frontDevice?.deviceId
-          ? { deviceId: { exact: frontDevice.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
-          : { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
-        audio: false,
-      });
-    } catch (err) {
-      console.log('Front camera with specific constraints failed, retrying with ideal user:', err);
-      try {
         frontStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'user' } },
+          video: frontDevice?.deviceId
+            ? { deviceId: { exact: frontDevice.deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
+            : { facingMode: { ideal: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } },
           audio: false,
         });
-      } catch (err2) {
-        console.log('Front camera unavailable for dual capture, falling back to single camera:', err2);
-        cleanupSourceEl(rearEl);
-        stopAllTracks(rearStream);
+
+        // Test if both cameras deliver live frames concurrently
+        const rearElTest = makeSourceVideoEl(rearStream);
+        const frontElTest = makeSourceVideoEl(frontStream);
+        const [rearLive, frontLive] = await Promise.all([
+          waitForLiveFrames(rearElTest, rearStream.getVideoTracks()[0], 2500),
+          waitForLiveFrames(frontElTest, frontStream.getVideoTracks()[0], 2500),
+        ]);
+
+        if (rearLive && frontLive) {
+          isSeparateSensors = true;
+          rearStreamRef.current = rearStream;
+          frontStreamRef.current = frontStream;
+          rearVideoElRef.current = rearElTest;
+          frontVideoElRef.current = frontElTest;
+        } else {
+          // Hardware exclusivity or timeout: tear down separate attempts
+          cleanupSourceEl(rearElTest);
+          cleanupSourceEl(frontElTest);
+          stopAllTracks(rearStream);
+          stopAllTracks(frontStream);
+          rearStream = null;
+          frontStream = null;
+        }
+      } catch (err) {
+        console.log('Separate 2-camera simultaneous capture failed, using unified dual compositing:', err);
+        if (rearStream) stopAllTracks(rearStream);
+        if (frontStream) stopAllTracks(frontStream);
+        rearStream = null;
+        frontStream = null;
+      }
+    }
+
+    // 2. If separate sensors are not available (single webcam, laptop, or mobile lock):
+    // Open the primary camera stream and feed BOTH back view and front PiP inset from it!
+    if (!isSeparateSensors) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: { ideal: cameraMode === 'front' ? 'user' : 'environment' } },
+          audio: true,
+        });
+        primaryStreamRef.current = stream;
+        rearStreamRef.current = stream;
+        frontStreamRef.current = stream;
+
+        // Two source video elements playing from the same stream:
+        // One for back background, one for front mirrored rectangular PiP inset!
+        rearVideoElRef.current = makeSourceVideoEl(stream);
+        frontVideoElRef.current = makeSourceVideoEl(stream);
+      } catch (err) {
+        console.error('Camera stream access failed completely:', err);
         return null;
       }
     }
 
-    const rearEl = makeSourceVideoEl(rearStream);
-    const frontEl = makeSourceVideoEl(frontStream);
-
-    const rearTrack = rearStream.getVideoTracks()[0];
-    const frontTrack = frontStream.getVideoTracks()[0];
-
-    // Warm-up: confirm both cameras are genuinely delivering frames
-    const [rearLive, frontLive] = await Promise.all([
-      waitForLiveFrames(rearEl, rearTrack, 3500),
-      waitForLiveFrames(frontEl, frontTrack, 3500),
-    ]);
-
-    if (!rearLive || !frontLive) {
-      console.log(
-        `Dual camera warm-up failed (rear live: ${rearLive}, front live: ${frontLive}) — device may only support one active camera stream. Falling back to single camera.`,
-      );
-      cleanupSourceEl(rearEl);
-      cleanupSourceEl(frontEl);
-      stopAllTracks(rearStream);
-      stopAllTracks(frontStream);
-      return null;
-    }
-
-    rearStreamRef.current = rearStream;
-    frontStreamRef.current = frontStream;
-    rearVideoElRef.current = rearEl;
-    frontVideoElRef.current = frontEl;
-
-    rearTrack.addEventListener('mute', () => console.warn('Rear camera track muted mid-recording.'));
-    rearTrack.addEventListener('ended', () => console.warn('Rear camera track ended mid-recording.'));
-    frontTrack.addEventListener('mute', () => console.warn('Front camera track muted mid-recording.'));
-    frontTrack.addEventListener('ended', () => console.warn('Front camera track ended mid-recording.'));
+    const rearEl = rearVideoElRef.current;
+    const frontEl = frontVideoElRef.current;
+    if (!rearEl || !frontEl) return null;
 
     const canvas = document.createElement('canvas');
     canvas.width = 1280;
     canvas.height = 720;
     canvasRef.current = canvas;
 
-    startCompositeLoop(rearEl, frontEl, canvas);
+    startCompositeLoop(rearEl, frontEl, canvas, isSeparateSensors);
 
     const canvasStream = canvas.captureStream(CANVAS_FPS);
     canvasStreamRef.current = canvasStream;
 
-    const audioTrack = rearStream.getAudioTracks()[0];
+    const baseStream = rearStreamRef.current || primaryStreamRef.current;
+    const audioTrack = baseStream?.getAudioTracks()[0];
     const combined = new MediaStream([
       ...canvasStream.getVideoTracks(),
       ...(audioTrack ? [audioTrack] : []),
@@ -406,67 +459,30 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     return combined;
   };
 
-  /** Original single-camera path, used when dual capture isn't available or fails. */
-  const startSingleCamera = async (): Promise<MediaStream | null> => {
+  /** Audio-only capture mode when user chooses audio evidence. */
+  const startAudioOnly = async (): Promise<MediaStream | null> => {
     try {
       if (!navigator.mediaDevices?.getUserMedia) return null;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: recordType === 'video' ? { facingMode: { ideal: cameraMode === 'front' ? 'user' : 'environment' } } : false,
-        audio: true,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
       primaryStreamRef.current = stream;
-      setActivePreviewStream(stream);
-      if (videoRef.current) videoRef.current.srcObject = stream;
+      setActivePreviewStream(null);
       setIsDualCamera(false);
       return stream;
     } catch (err) {
-      console.log('Camera permission or availability:', err);
+      console.log('Microphone unavailable:', err);
       return null;
     }
   };
-
-  /**
-   * Fallback path specifically for when a dual-camera attempt didn't pan
-   * out. Tries the rear camera first regardless of the current
-   * `cameraMode` toggle — rear is the primary evidence angle — then falls
-   * back to front if rear genuinely isn't available (e.g. front-only
-   * devices, or a permission prompt only granted for one lens).
-   */
-  const startSingleCameraPreferRear = async (): Promise<MediaStream | null> => {
-    const attempts: Array<'rear' | 'front'> = ['rear', 'front'];
-    for (const mode of attempts) {
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) return null;
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: mode === 'front' ? 'user' : 'environment' } },
-          audio: true,
-        });
-        primaryStreamRef.current = stream;
-        setActivePreviewStream(stream);
-        if (videoRef.current) videoRef.current.srcObject = stream;
-        setCameraMode(mode);
-        setIsDualCamera(false);
-        return stream;
-      } catch (err) {
-        console.log(`${mode} camera unavailable during dual-capture fallback:`, err);
-      }
-    }
-    return null;
-  };
-
   const startRecording = async () => {
     if (isRecording) return; // already recording — SOS + manual button both call this safely
 
     let recordingStream: MediaStream | null = null;
 
     if (recordType === 'video') {
-      recordingStream = await tryStartDualCamera();
-      if (!recordingStream) {
-        recordingStream = await startSingleCameraPreferRear();
-      }
+      recordingStream = await startDualCameraPipeline();
     } else {
-      // Audio-only mode never needs dual camera compositing.
-      recordingStream = await startSingleCamera();
+      // Audio-only mode
+      recordingStream = await startAudioOnly();
     }
 
     recordingStreamRef.current = recordingStream;

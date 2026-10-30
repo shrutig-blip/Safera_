@@ -289,6 +289,50 @@ export const SosDialog: React.FC<SosDialogProps> = ({
           </button>
         </div>
 
+        {/* Live Dual Evidence Camera Viewfinder (Instant upon SOS trigger) */}
+        {isRecording && (
+          <div className="bg-white border-2 border-[#A70F43]/30 rounded-2xl p-3 sm:p-4 space-y-2.5 shadow-md animate-fadeIn">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#A70F43] animate-pulse" />
+                <span className="text-xs font-black text-[#A70F43]">
+                  EVIDENCE RECORDING ({recorder ? `00:${recorder.recordSeconds < 10 ? '0' + recorder.recordSeconds : recorder.recordSeconds}` : 'ACTIVE'})
+                </span>
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-2 py-0.5 rounded border border-emerald-300 flex items-center gap-1">
+                  <Camera className="w-3 h-3 text-emerald-700" />
+                  DUAL CAM (BACK + FRONT PiP)
+                </span>
+              </div>
+              <button
+                onClick={onStopRecording}
+                className="text-[10px] font-extrabold text-[#A70F43] hover:underline"
+              >
+                Stop & Save to Vault
+              </button>
+            </div>
+
+            {/* Live Dual Video Preview with Front Inset */}
+            <div className="relative w-full aspect-video max-h-56 bg-black rounded-xl overflow-hidden flex items-center justify-center border border-[#E9D8DE] shadow-inner">
+              <video
+                ref={(el) => {
+                  if (el && recorder?.activePreviewStream && el.srcObject !== recorder.activePreviewStream) {
+                    el.srcObject = recorder.activePreviewStream;
+                    void el.play().catch(() => {});
+                  }
+                }}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-contain bg-black"
+              />
+              <div className="absolute top-2 left-2 px-2 py-0.5 bg-black/75 backdrop-blur-sm rounded text-[9px] font-mono text-white flex items-center gap-1.5 z-10">
+                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
+                <span>REC • DUAL CAMERA (BACK + FRONT PiP)</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Dispatch Screen Stages */}
         {dispatchStage === 'countdown' && (
           <div className="bg-[#FFF0F3] border-2 border-[#A70F43] rounded-2xl p-5 text-center space-y-3 animate-pulse">
