@@ -424,12 +424,6 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onAuthSuccess, onBackToLandi
                           className="px-3 py-2 rounded-lg border border-[#EFE6E1] bg-white text-xs focus:outline-none focus:ring-2 focus:ring-[#8A1E41]/30"
                         />
                       </div>
-                      <input
-                        placeholder="Telegram chat ID (optional, for free auto-alerts)"
-                        value={c.telegramChatId ?? ''}
-                        onChange={(e) => updateContact(c.id, { telegramChatId: e.target.value.trim() })}
-                        className="w-full px-3 py-2 rounded-lg border border-[#EFE6E1] bg-white text-xs focus:outline-none focus:ring-2 focus:ring-[#8A1E41]/30"
-                      />
                       <div className="flex items-center gap-2">
                         <input
                           placeholder="Phone number"
