@@ -24,8 +24,8 @@ Many people still travel without a reliable safety layer — especially in unfam
 ### 1. Safe route planning
 Guide users through safer paths with route suggestions and location-based awareness.
 
-![Route planner preview](assets/route_mapping_1 (2).png)
-![Route planner preview](assets/route_mapping_2 (2).png)
+![Route planner preview](assets/route_mapping1.png)
+![Route planner preview](assets/route_mapping2.png)
 ![Route planner preview](assets/route_mapping_3.png)
 
 ### 2. Smart safety map
