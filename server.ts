@@ -35,6 +35,11 @@ function uploadEncryptedToCloudinary(buffer: Buffer, id: string, context: Record
 }
 
 const app = express();
+
+// Render sits behind a reverse proxy. Without this, req.ip is the proxy's IP for
+// every visitor, so autoAlert's per-IP rate limit (5 per 10 min) is shared by ALL
+// users and starts returning 429 after a few test alerts.
+app.set('trust proxy', 1);
 const PORT = Number(process.env.PORT) || 3000;
 
 // Bumped from 10mb to 50mb: encrypted evidence recordings (video/audio,

@@ -84,6 +84,8 @@ export interface EmergencyContact {
   phone: string;
   isPrimary: boolean;
   sendSms: boolean;
+  /** Telegram chat ID of this contact (they must have pressed Start on the Safera bot). Enables free automatic alerts. */
+  telegramChatId?: string;
 }
 
 export interface EvidenceItem {
