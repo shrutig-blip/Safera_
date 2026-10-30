@@ -292,27 +292,45 @@ export const SosDialog: React.FC<SosDialogProps> = ({
         {/* Live Dual Evidence Camera Viewfinder (Instant upon SOS trigger) */}
         {isRecording && (
           <div className="bg-white border-2 border-[#A70F43]/30 rounded-2xl p-3 sm:p-4 space-y-2.5 shadow-md animate-fadeIn">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#A70F43] animate-pulse" />
                 <span className="text-xs font-black text-[#A70F43]">
-                  EVIDENCE RECORDING ({recorder ? `00:${recorder.recordSeconds < 10 ? '0' + recorder.recordSeconds : recorder.recordSeconds}` : 'ACTIVE'})
+                  REC {recorder ? `00:${recorder.recordSeconds < 10 ? '0' + recorder.recordSeconds : recorder.recordSeconds}` : ''}
                 </span>
-                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-2 py-0.5 rounded border border-emerald-300 flex items-center gap-1">
-                  <Camera className="w-3 h-3 text-emerald-700" />
-                  DUAL CAM (BACK + FRONT PiP)
-                </span>
+
+                {/* Mode Indicator: Dual Camera Active vs Rear Camera Only */}
+                {recorder?.cameraModeStatus === 'dual' ? (
+                  <span className="text-[10px] bg-emerald-100 text-emerald-800 font-extrabold px-2.5 py-0.5 rounded-full border border-emerald-300 flex items-center gap-1.5 shadow-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
+                    Dual Camera Active
+                  </span>
+                ) : (
+                  <span className="text-[10px] bg-amber-50 text-amber-900 font-extrabold px-2.5 py-0.5 rounded-full border border-amber-300 flex items-center gap-1.5 shadow-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+                    Rear Camera Only
+                  </span>
+                )}
               </div>
+
               <button
                 onClick={onStopRecording}
-                className="text-[10px] font-extrabold text-[#A70F43] hover:underline"
+                className="text-[10px] font-black text-[#A70F43] hover:underline uppercase tracking-wider"
               >
                 Stop & Save to Vault
               </button>
             </div>
 
-            {/* Live Dual Video Preview with Front Inset */}
-            <div className="relative w-full aspect-video max-h-56 bg-black rounded-xl overflow-hidden flex items-center justify-center border border-[#E9D8DE] shadow-inner">
+            {/* Small clear fallback notification when dual camera is unsupported */}
+            {recorder?.fallbackNotice && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-2 text-xs text-amber-900 font-medium">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>{recorder.fallbackNotice}</span>
+              </div>
+            )}
+
+            {/* Live Camera Viewport */}
+            <div className="relative w-full aspect-video max-h-60 bg-black rounded-xl overflow-hidden flex items-center justify-center border border-[#E9D8DE] shadow-inner">
               <video
                 ref={(el) => {
                   if (el && recorder?.activePreviewStream && el.srcObject !== recorder.activePreviewStream) {
@@ -325,9 +343,9 @@ export const SosDialog: React.FC<SosDialogProps> = ({
                 muted
                 className="w-full h-full object-contain bg-black"
               />
-              <div className="absolute top-2 left-2 px-2 py-0.5 bg-black/75 backdrop-blur-sm rounded text-[9px] font-mono text-white flex items-center gap-1.5 z-10">
+              <div className="absolute top-2 left-2 px-2.5 py-0.5 bg-black/75 backdrop-blur-sm rounded text-[9px] font-mono text-white flex items-center gap-1.5 z-10">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
-                <span>REC • DUAL CAMERA (BACK + FRONT PiP)</span>
+                <span>LIVE EVIDENCE • {recorder?.cameraModeLabel?.toUpperCase() || 'RECORDING'}</span>
               </div>
             </div>
           </div>

@@ -15,6 +15,7 @@ import {
   Download,
   Key,
   ShieldCheck,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface EvidenceVaultProps {
@@ -41,6 +42,9 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
     startRecording,
     stopRecording,
     isDualCamera,
+    cameraModeStatus,
+    cameraModeLabel,
+    fallbackNotice,
     activePreviewStream,
   } = recorder;
 
@@ -148,13 +152,14 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
             </span>
             <div className="flex items-center gap-2">
               {isDualCamera ? (
-                <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-bold border border-emerald-300 flex items-center gap-1">
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-extrabold border border-emerald-300 flex items-center gap-1.5 shadow-sm">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-pulse" />
-                  DUAL CAM (PiP)
+                  Dual Camera Active
                 </span>
               ) : (
-                <span className="px-2 py-0.5 rounded-md bg-[#FFF0F3] text-[#A70F43] text-[10px] font-bold border border-[#E9D8DE]">
-                  SINGLE CAM
+                <span className="px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-900 text-[10px] font-extrabold border border-amber-300 flex items-center gap-1.5 shadow-sm">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-600" />
+                  Rear Camera Only
                 </span>
               )}
               <button
@@ -166,6 +171,13 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
               </button>
             </div>
           </div>
+
+          {fallbackNotice && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 flex items-center gap-2 text-xs text-amber-900 font-medium">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>{fallbackNotice}</span>
+            </div>
+          )}
 
           {/* Camera Stream Viewport Container */}
           <div className="relative bg-[#FFF8F9] border border-[#E9D8DE] rounded-xl overflow-hidden min-h-[250px] flex items-center justify-center">
