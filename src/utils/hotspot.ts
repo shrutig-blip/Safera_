@@ -372,32 +372,65 @@ export function findNearestSafeResource(
 }
 
 export interface RoutePathAssessment {
-  /** 0-100, higher = safer. Derived entirely from real distance to known locations/reports, not guessed. */
+  /** 0-100, higher = safer. Derived from real distance to known locations/reports; stretches with no nearby data are scored with a cautious prior, never as "safe". Capped at 95 — no route is ever "100% safe". */
   pathSafetyScore: number;
   avgRisk: number;
   maxRisk: number;
-  /** Kernel-weighted average of nearby locations' real lighting rating, as a percentage. */
+  /** Average of nearby locations' real lighting rating, as a percentage. Only meaningful when `lightingKnown` is true. */
   lightingPercent: number;
-  /** Kernel-weighted average of nearby locations' real CCTV coverage. */
+  /** Average of nearby locations' real CCTV coverage. Only meaningful when `cctvKnown` is true. */
   cctvPercent: number;
-  /** Share of the route's sampled points that fall near a location with wheelchair-accessible infrastructure. */
+  /** Share of data-covered samples near a location with wheelchair-accessible infrastructure. Only meaningful when `accessibilityKnown` is true. */
   accessibilityPercent: number;
   /** True if any sampled point on the route passes within ~400m of a location with an active police booth. */
   policeBoothNearby: boolean;
   /** Human-readable warnings for the specific risky stretches actually found along this path. */
   riskSegments: string[];
   /**
-   * True when there was no real location/report data anywhere near this
-   * route to score against. When true, every numeric field above is a
-   * neutral placeholder, not a measurement — callers should show an
-   * "insufficient data" state instead of presenting these as real scores.
+   * True when too little of this route (< 25%) has any real location/report
+   * data nearby to score against. When true, the numeric fields are
+   * estimates built from a cautious prior, not measurements — callers should
+   * label them as estimates.
    */
   insufficientData: boolean;
+  /** 0-100: share of the route's sampled points with real location/report data within range. */
+  dataCoveragePercent: number;
+  /** False when no sampled point had a logged location nearby — the matching percent is a placeholder, show "No data". */
+  lightingKnown: boolean;
+  cctvKnown: boolean;
+  accessibilityKnown: boolean;
 }
 
 const ROUTE_SAMPLE_COUNT = 30;
 const NEARBY_LOCATION_MAX_METERS = 1200;
 const POLICE_BOOTH_PROXIMITY_METERS = 400;
+
+// A logged location only counts as "data for this stretch" if it is this
+// close. (1200 m is fine for naming a nearby landmark, but far too loose for
+// claiming a stretch's lighting or accessibility is known.)
+const DATA_COVERAGE_METERS = 500;
+const REPORT_COVERAGE_METERS = 300;
+const MIN_COVERAGE_FOR_MEASUREMENT = 0.25;
+const MAX_DISPLAYED_SAFETY_SCORE = 95;
+
+/**
+ * Risk assumed for a stretch of route where we have NO logged data. Unknown
+ * is not the same as safe — it is more worrying the darker it is.
+ */
+function unknownStretchRisk(timeOfDay: TimeOfDay): number {
+  switch (timeOfDay) {
+    case 'Day':
+      return 35;
+    case 'Dusk':
+      return 40;
+    case 'Night':
+      return 50;
+    case 'Late Night':
+      return 55;
+    default:
+      return 40;
+  }
+}
 
 /**
  * Scores a real routed path (e.g. one OSRM alternative) against actual
@@ -406,6 +439,12 @@ const POLICE_BOOTH_PROXIMITY_METERS = 400;
  * segments against real crime/incident data rather than trusting a
  * black-box "safety score"), computed here client-side via the same
  * Gaussian-kernel risk model that drives the Live Safety Grid.
+ *
+ * Missing data is never treated as safety: a sampled point with no logged
+ * location within DATA_COVERAGE_METERS (and no report within
+ * REPORT_COVERAGE_METERS) is "uncovered" and scored with a cautious prior;
+ * lighting / CCTV / accessibility are averaged over covered points only and
+ * flagged unknown when there are none.
  */
 export function scoreRoutePath(
   path: LatLng[],
@@ -413,17 +452,23 @@ export function scoreRoutePath(
   reports: CommunityReport[],
   timeOfDay: TimeOfDay
 ): RoutePathAssessment {
+  const priorRisk = unknownStretchRisk(timeOfDay);
+
   if (path.length === 0 || (locations.length === 0 && reports.length === 0)) {
     return {
-      pathSafetyScore: 70,
-      avgRisk: 30,
-      maxRisk: 30,
+      pathSafetyScore: 100 - priorRisk,
+      avgRisk: priorRisk,
+      maxRisk: priorRisk,
       lightingPercent: 60,
       cctvPercent: 50,
       accessibilityPercent: 50,
       policeBoothNearby: false,
       riskSegments: [],
       insufficientData: true,
+      dataCoveragePercent: 0,
+      lightingKnown: false,
+      cctvKnown: false,
+      accessibilityKnown: false,
     };
   }
 
@@ -449,7 +494,9 @@ export function scoreRoutePath(
   }
 
   let riskSum = 0;
-  let maxRisk = 0;
+  let coveredMaxRisk = 0;
+  let coveredCount = 0;
+  let locationDataCount = 0;
   let lightingSum = 0;
   let cctvSum = 0;
   let accessibleCount = 0;
@@ -458,6 +505,7 @@ export function scoreRoutePath(
   interface Sample {
     distanceAlongRoute: number;
     risk: number;
+    covered: boolean;
     lat: number;
     lng: number;
     nearestLocationName: string | null;
@@ -466,9 +514,7 @@ export function scoreRoutePath(
 
   for (const idx of sampledIndices) {
     const point = path[idx];
-    const risk = computePointRisk(point.lat, point.lng, locations, reports, timeOfDay, locationBandwidth, reportBandwidth);
-    riskSum += risk;
-    maxRisk = Math.max(maxRisk, risk);
+    const computedRisk = computePointRisk(point.lat, point.lng, locations, reports, timeOfDay, locationBandwidth, reportBandwidth);
 
     // Nearest real location, used to ground lighting/CCTV/accessibility
     // numbers and to name risky segments after an actual place.
@@ -483,9 +529,27 @@ export function scoreRoutePath(
     }
 
     const withinRange = nearest && nearestDistance <= NEARBY_LOCATION_MAX_METERS;
-    lightingSum += withinRange ? nearest!.lightingStars * 20 : 60;
-    cctvSum += withinRange ? nearest!.cctvPercent : 50;
-    if (withinRange && nearest!.accessibility.wheelchairRamps) accessibleCount++;
+    const hasLocationData = !!nearest && nearestDistance <= DATA_COVERAGE_METERS;
+    const hasReportData = reports.some(
+      (r) => haversineDistanceMeters(point.lat, point.lng, r.lat, r.lng) <= REPORT_COVERAGE_METERS
+    );
+    const covered = hasLocationData || hasReportData;
+
+    // Unknown is not safe: uncovered stretches get the cautious prior
+    // instead of the kernel's "nothing nearby = zero risk".
+    const risk = covered ? computedRisk : priorRisk;
+    riskSum += risk;
+    if (covered) {
+      coveredCount++;
+      coveredMaxRisk = Math.max(coveredMaxRisk, risk);
+    }
+
+    if (hasLocationData) {
+      locationDataCount++;
+      lightingSum += nearest!.lightingStars * 20;
+      cctvSum += nearest!.cctvPercent;
+      if (nearest!.accessibility.wheelchairRamps) accessibleCount++;
+    }
     if (nearest && nearest.accessibility.policeBooths && nearestDistance <= POLICE_BOOTH_PROXIMITY_METERS) {
       policeBoothNearby = true;
     }
@@ -493,6 +557,7 @@ export function scoreRoutePath(
     samples.push({
       distanceAlongRoute: cumulativeDistances[idx],
       risk,
+      covered,
       lat: point.lat,
       lng: point.lng,
       nearestLocationName: withinRange ? nearest!.name : null,
@@ -500,12 +565,17 @@ export function scoreRoutePath(
   }
 
   const n = samples.length;
+  const coverage = coveredCount / n;
   const avgRisk = riskSum / n;
-  const pathSafetyScore = Math.round(100 - Math.min(100, Math.max(0, avgRisk * 0.55 + maxRisk * 0.45)));
+  const maxRisk = coveredCount > 0 ? coveredMaxRisk : priorRisk;
+  const rawScore = 100 - Math.min(100, Math.max(0, avgRisk * 0.55 + maxRisk * 0.45));
+  const pathSafetyScore = Math.min(MAX_DISPLAYED_SAFETY_SCORE, Math.round(rawScore));
 
   // Group contiguous high-risk samples (>=51, matching the grid's "high"
   // band) into segments so the warning describes one real stretch of the
-  // route instead of listing every individual sample point.
+  // route instead of listing every individual sample point. Only samples
+  // backed by real data can raise a warning — an assumed prior must never
+  // be presented as a found hazard.
   const riskSegments: string[] = [];
   let segmentStart: Sample | null = null;
   let segmentPeak = 0;
@@ -525,7 +595,7 @@ export function scoreRoutePath(
   };
 
   for (const sample of samples) {
-    if (sample.risk >= 51) {
+    if (sample.covered && sample.risk >= 51) {
       if (!segmentStart) segmentStart = sample;
       if (sample.risk > segmentPeak) {
         segmentPeak = sample.risk;
@@ -537,16 +607,22 @@ export function scoreRoutePath(
   }
   if (segmentStart) flushSegment(samples[samples.length - 1]);
 
+  const lightingKnown = locationDataCount > 0;
+
   return {
     pathSafetyScore,
     avgRisk: Math.round(avgRisk),
     maxRisk,
-    lightingPercent: Math.round(Math.min(100, lightingSum / n)),
-    cctvPercent: Math.round(Math.min(100, cctvSum / n)),
-    accessibilityPercent: Math.round((accessibleCount / n) * 100),
+    lightingPercent: lightingKnown ? Math.round(Math.min(100, lightingSum / locationDataCount)) : 60,
+    cctvPercent: lightingKnown ? Math.round(Math.min(100, cctvSum / locationDataCount)) : 50,
+    accessibilityPercent: lightingKnown ? Math.round((accessibleCount / locationDataCount) * 100) : 50,
     policeBoothNearby,
     riskSegments: riskSegments.slice(0, 3), // keep the card readable
-    insufficientData: false,
+    insufficientData: coverage < MIN_COVERAGE_FOR_MEASUREMENT,
+    dataCoveragePercent: Math.round(coverage * 100),
+    lightingKnown,
+    cctvKnown: lightingKnown,
+    accessibilityKnown: lightingKnown,
   };
 }
 
