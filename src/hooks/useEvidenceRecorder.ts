@@ -3,6 +3,7 @@ import { EvidenceItem } from '../types';
 import { getBestEffortLocation, SosCoords } from '../utils/sos';
 import { reverseGeocode } from '../lib/geocode';
 import { getOrCreateVaultKey, encryptBlob } from '../lib/evidenceCrypto';
+import { addMyEvidenceId } from '../lib/vaultIndex';
 
 const MAX_RECORDING_MS = 15 * 60 * 1000; // safety cap so a stuck SOS session doesn't record forever
 const CANVAS_FPS = 30;
@@ -692,6 +693,7 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
       const localUrl = blob.size > 0 ? URL.createObjectURL(blob) : '';
       let isCloudBackedUp = false;
       let isEncrypted = false;
+      let serverId: string | undefined = undefined;
 
       if (blob.size > 0) {
         try {
@@ -716,6 +718,13 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
             }),
           });
           isCloudBackedUp = res.ok;
+          if (res.ok) {
+            const data = await res.json().catch(() => null);
+            if (typeof data?.id === 'string') {
+              addMyEvidenceId(data.id);
+              serverId = data.id;
+            }
+          }
         } catch (err) {
           console.warn('Evidence encryption/upload failed, keeping locally:', err);
         }
@@ -723,6 +732,8 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
 
       const newEntry: EvidenceItem = {
         id: `ev-${Date.now()}`,
+        serverId,
+        origin: 'session',
         title: `Safera_${typeAtStop.toUpperCase()}_${new Date().toISOString().slice(0, 10)}_${Date.now()}.webm`,
         type: typeAtStop,
         timestamp: new Date().toLocaleString(),

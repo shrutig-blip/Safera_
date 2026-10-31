@@ -100,6 +100,8 @@ export interface EvidenceItem {
   mediaUrl: string;
   isEncrypted: boolean;
   isCloudBackedUp: boolean;
+  serverId?: string;
+  origin?: 'session' | 'cloud';
 }
 
 export interface VitalSignData {

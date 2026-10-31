@@ -51,6 +51,21 @@ export async function getOrCreateVaultKey(): Promise<CryptoKey> {
   return key;
 }
 
+/**
+ * Reads the existing device-bound vault key from localStorage without creating one.
+ * Returns null if no vault key exists on this device/browser.
+ */
+export async function getExistingVaultKey(): Promise<CryptoKey | null> {
+  try {
+    const stored = localStorage.getItem(VAULT_KEY_STORAGE_KEY);
+    if (!stored) return null;
+    const raw = base64ToUint8Array(stored);
+    return await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+  } catch {
+    return null;
+  }
+}
+
 export interface EncryptedBlobResult {
   ciphertextBase64: string;
   ivBase64: string;
@@ -74,4 +89,40 @@ export async function encryptBlob(vaultKey: CryptoKey, blob: Blob): Promise<Encr
     ivBase64: arrayBufferToBase64(iv.buffer),
     sha256Hash,
   };
+}
+
+/**
+ * Decrypts AES-256-GCM ciphertext using the device's vault key and IV.
+ * Optionally verifies the decrypted plaintext against the expected SHA-256 hash.
+ */
+export async function decryptBlob(
+  vaultKey: CryptoKey,
+  ciphertext: ArrayBuffer,
+  ivBase64: string,
+  mimeType: string,
+  expectedSha256?: string
+): Promise<Blob> {
+  let plaintextBuffer: ArrayBuffer;
+  try {
+    const iv = base64ToUint8Array(ivBase64);
+    plaintextBuffer = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv },
+      vaultKey,
+      ciphertext
+    );
+  } catch {
+    throw new Error('WRONG_KEY');
+  }
+
+  if (expectedSha256) {
+    const digest = await crypto.subtle.digest('SHA-256', plaintextBuffer);
+    const actualSha256 = Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    if (actualSha256.toLowerCase() !== expectedSha256.toLowerCase()) {
+      throw new Error('INTEGRITY_MISMATCH');
+    }
+  }
+
+  return new Blob([plaintextBuffer], { type: mimeType });
 }
