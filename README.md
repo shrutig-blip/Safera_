@@ -42,7 +42,7 @@ Provide instant help with SOS, siren, fake call, flashlight, and offline fallbac
 Let users securely collect and organize evidence such as photos, notes, and recordings and cloudinary integration that keeps the evidence secure and untempered.
 
 ![Evidence vault preview](assets/evidence-vault.png)
-![Cloudinary account preview](assets/cloudinary_integration (2).png)
+![Cloudinary account preview](assets/cloudinary_integration.png)
 
 ### 5. AI companion and community support
 Offer conversational support and local safety reporting in one experience.
