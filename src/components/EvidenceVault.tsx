@@ -3,6 +3,7 @@ import { EvidenceItem } from '../types';
 import { GuardIaLogo } from './GuardIaLogo';
 import { EvidenceRecorderState } from '../hooks/useEvidenceRecorder';
 import { hasVaultPin, setVaultPin, verifyVaultPin } from '../lib/auth';
+import { openCloudEvidence } from '../lib/vaultSync';
 import { ShareEvidenceModal } from './ShareEvidenceModal';
 import {
   Shield,
@@ -58,6 +59,10 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
   }, [videoRef, activePreviewStream]);
 
   const [sharingItem, setSharingItem] = useState<EvidenceItem | null>(null);
+  const [viewingItem, setViewingItem] = useState<EvidenceItem | null>(null);
+  const [viewingUrl, setViewingUrl] = useState<string | null>(null);
+  const [isOpeningEvidence, setIsOpeningEvidence] = useState(false);
+  const [viewError, setViewError] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState(true);
   const [pinInput, setPinInput] = useState('');
   const [pinConfirmInput, setPinConfirmInput] = useState('');
@@ -72,6 +77,41 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
   useEffect(() => {
     setNeedsPinSetup(!hasVaultPin());
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (viewingUrl) URL.revokeObjectURL(viewingUrl);
+    };
+  }, [viewingUrl]);
+
+  const closeEvidenceViewer = () => {
+    setViewingItem(null);
+    setViewingUrl(null);
+    setViewError(null);
+  };
+
+  const handleOpenEvidence = async (item: EvidenceItem) => {
+    setViewingItem(item);
+    setViewingUrl(null);
+    setViewError(null);
+    setIsOpeningEvidence(true);
+
+    try {
+      const decryptedBlob = await openCloudEvidence(item);
+      setViewingUrl(URL.createObjectURL(decryptedBlob));
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'DOWNLOAD_FAILED';
+      const messages: Record<string, string> = {
+        NO_KEY: 'This device has no vault key. Unlock the vault on the device that recorded this evidence.',
+        WRONG_KEY: 'This evidence could not be decrypted with the current vault key.',
+        DOWNLOAD_FAILED: 'The encrypted evidence could not be downloaded. Check your connection and try again.',
+        TOO_LARGE: 'This evidence file is too large to open in the viewer.',
+      };
+      setViewError(messages[code] || 'This evidence could not be opened.');
+    } finally {
+      setIsOpeningEvidence(false);
+    }
+  };
 
   // Real PIN system: no hardcoded default, no blank-input bypass. First
   // visit asks the user to set their own 4-8 digit PIN (hashed the same
@@ -387,6 +427,15 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
                     </span>
 
                     <div className="flex items-center gap-2.5">
+                      {item.origin === 'cloud' && (
+                        <button
+                          onClick={() => void handleOpenEvidence(item)}
+                          className="text-[#A70F43] hover:text-[#8D0D39] font-bold flex items-center gap-1 text-[10px]"
+                        >
+                          <Video className="w-3 h-3" />
+                          Open
+                        </button>
+                      )}
                       <button
                         onClick={() => alert(`Exporting encrypted dossier for file ${item.title}...`)}
                         className="text-[#A70F43] hover:text-[#8D0D39] font-bold flex items-center gap-1 text-[10px]"
@@ -431,6 +480,48 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
           item={sharingItem}
           onClose={() => setSharingItem(null)}
         />
+      )}
+
+      {viewingItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-label={`Viewing ${viewingItem.title}`}>
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-4 shadow-xl space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-sm font-bold text-[#2F2B2D] truncate">{viewingItem.title}</h3>
+              <button
+                onClick={closeEvidenceViewer}
+                className="text-xs font-bold text-[#A70F43] hover:text-[#8D0D39]"
+              >
+                Close
+              </button>
+            </div>
+
+            {isOpeningEvidence && (
+              <p className="rounded-xl bg-[#FFF8F9] p-6 text-center text-xs text-[#7B7280]">
+                Decrypting evidence…
+              </p>
+            )}
+
+            {viewError && (
+              <p className="rounded-xl border border-red-200 bg-red-50 p-4 text-xs font-semibold text-red-800">
+                {viewError}
+              </p>
+            )}
+
+            {viewingUrl && !viewError && (
+              <div className="max-h-[70vh] overflow-auto rounded-xl bg-black p-2 flex items-center justify-center">
+                {viewingItem.type === 'photo' && (
+                  <img src={viewingUrl} alt={viewingItem.title} className="max-h-[65vh] max-w-full object-contain" />
+                )}
+                {viewingItem.type === 'video' && (
+                  <video src={viewingUrl} controls playsInline className="max-h-[65vh] max-w-full" />
+                )}
+                {viewingItem.type === 'audio' && (
+                  <audio src={viewingUrl} controls className="w-full" />
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
