@@ -3,6 +3,7 @@ import { EvidenceItem } from '../types';
 import { GuardIaLogo } from './GuardIaLogo';
 import { EvidenceRecorderState } from '../hooks/useEvidenceRecorder';
 import { hasVaultPin, setVaultPin, verifyVaultPin } from '../lib/auth';
+import { ShareEvidenceModal } from './ShareEvidenceModal';
 import {
   Shield,
   Camera,
@@ -16,6 +17,7 @@ import {
   Key,
   ShieldCheck,
   AlertTriangle,
+  Share2,
 } from 'lucide-react';
 
 interface EvidenceVaultProps {
@@ -55,6 +57,7 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
     }
   }, [videoRef, activePreviewStream]);
 
+  const [sharingItem, setSharingItem] = useState<EvidenceItem | null>(null);
   const [isLocked, setIsLocked] = useState(true);
   const [pinInput, setPinInput] = useState('');
   const [pinConfirmInput, setPinConfirmInput] = useState('');
@@ -383,13 +386,38 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
                       Size: <strong className="text-[#2F2B2D]">{item.fileSize}</strong>
                     </span>
 
-                    <button
-                      onClick={() => alert(`Exporting encrypted dossier for file ${item.title}...`)}
-                      className="text-[#A70F43] hover:text-[#8D0D39] font-bold flex items-center gap-1"
-                    >
-                      <Download className="w-3 h-3" />
-                      Export
-                    </button>
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        onClick={() => alert(`Exporting encrypted dossier for file ${item.title}...`)}
+                        className="text-[#A70F43] hover:text-[#8D0D39] font-bold flex items-center gap-1 text-[10px]"
+                      >
+                        <Download className="w-3 h-3" />
+                        Export
+                      </button>
+
+                      {(() => {
+                        const canShare = Boolean(item.mediaUrl && item.mediaUrl.startsWith('blob:'));
+                        return (
+                          <button
+                            onClick={() => canShare && setSharingItem(item)}
+                            disabled={!canShare}
+                            title={
+                              canShare
+                                ? 'Share an unencrypted link'
+                                : 'Only evidence recorded in this session can be shared. Older items are encrypted on the server.'
+                            }
+                            className={`font-bold flex items-center gap-1 text-[10px] transition-colors ${
+                              canShare
+                                ? 'text-[#A70F43] hover:text-[#8D0D39] cursor-pointer'
+                                : 'text-[#7B7280]/40 cursor-not-allowed'
+                            }`}
+                          >
+                            <Share2 className="w-3 h-3" />
+                            Share
+                          </button>
+                        );
+                      })()}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -397,6 +425,13 @@ export const EvidenceVault: React.FC<EvidenceVaultProps> = ({ evidenceList, reco
           )}
         </div>
       </div>
+
+      {sharingItem && (
+        <ShareEvidenceModal
+          item={sharingItem}
+          onClose={() => setSharingItem(null)}
+        />
+      )}
     </div>
   );
 };
