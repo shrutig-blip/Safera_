@@ -535,55 +535,77 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
   };
 
   /**
-   * Fallback: Initializes uninterrupted rear-camera evidence capture.
-   * Preserves native video quality and orientation.
+   * Fallback: Initializes single-camera evidence capture.
+   * Tries the rear camera first, then the front camera, then any camera the
+   * device has. Only "ideal" sizes are requested (no hard minimums) so low-res
+   * cameras (laptop webcams, many front cameras) still open. The microphone is
+   * optional: if it is missing or blocked, video is recorded without sound.
    */
   const initializeRearCameraRecording = async (): Promise<MediaStream | null> => {
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) return null;
+    if (!navigator.mediaDevices?.getUserMedia) return null;
 
-      let stream: MediaStream | null = null;
-      let usedMode: 'rear' | 'front' = 'rear';
+    const attempts: MediaTrackConstraints[] = [
+      { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+      { facingMode: { ideal: 'user' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    ];
+    const isPermissionError = (err: unknown) => {
+      const name = (err as { name?: string } | null)?.name;
+      return name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError';
+    };
 
-      // 1. Prioritize Rear Camera
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1920, min: 1280 },
-            height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 30 },
-          },
-          audio: true,
-        });
-        usedMode = 'rear';
-      } catch {
-        // 2. Fall back to available camera if environment camera is not available (e.g. front-only laptop)
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'user' },
-            width: { ideal: 1280, min: 640 },
-            height: { ideal: 720, min: 480 },
-          },
-          audio: true,
-        });
-        usedMode = 'front';
+    let stream: MediaStream | null = null;
+    let noMic = false;
+    let denied = false;
+
+    outer: for (const video of [...attempts, true as const]) {
+      for (const withAudio of [true, false]) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video, audio: withAudio });
+          noMic = !withAudio;
+          break outer;
+        } catch (err) {
+          console.warn('Camera attempt failed:', err);
+          // Camera permission blocked: retrying other cameras is pointless.
+          if (isPermissionError(err) && !withAudio) {
+            denied = true;
+            break outer;
+          }
+        }
       }
+    }
 
-      primaryStreamRef.current = stream;
-      setActivePreviewStream(stream);
-      if (videoRef.current) videoRef.current.srcObject = stream;
-
-      setIsDualCamera(false);
-      setCameraMode(usedMode);
-      setCameraModeStatus(usedMode === 'rear' ? 'rear-only' : 'front-only');
-      setCameraModeLabel(usedMode === 'rear' ? 'Rear Camera Only' : 'Front Camera Only');
-
-      return stream;
-    } catch (err) {
-      console.error('Rear camera recording fallback failed:', err);
+    if (!stream) {
+      setFallbackNotice(
+        denied
+          ? 'Camera permission is blocked. Allow camera access in your browser settings and try again.'
+          : 'No camera could be opened on this device.'
+      );
       return null;
     }
+
+    // Work out which camera actually opened (not just which one was requested).
+    const track = stream.getVideoTracks()[0];
+    const facing = track?.getSettings?.().facingMode;
+    const usedMode: 'rear' | 'front' =
+      facing === 'environment' ? 'rear'
+      : facing === 'user' ? 'front'
+      : /back|rear|environment/i.test(track?.label || '') ? 'rear'
+      : 'front';
+
+    primaryStreamRef.current = stream;
+    setActivePreviewStream(stream);
+    if (videoRef.current) videoRef.current.srcObject = stream;
+
+    setIsDualCamera(false);
+    setCameraMode(usedMode);
+    setCameraModeStatus(usedMode === 'rear' ? 'rear-only' : 'front-only');
+    setCameraModeLabel(usedMode === 'rear' ? 'Rear Camera Only' : 'Front Camera Only');
+    setFallbackNotice(
+      `Dual camera isn't supported on this device. Recording with the ${usedMode === 'rear' ? 'rear' : 'front'} camera instead.` +
+        (noMic ? ' Microphone is unavailable, so this video has no sound.' : '')
+    );
+
+    return stream;
   };
 
   /** Audio-only capture mode when user chooses audio evidence. */
@@ -621,7 +643,6 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
 
       // Step 3: If dual camera isn't supported OR initialization failed, graceful rear-camera fallback
       if (!recordingStream) {
-        setFallbackNotice("Dual camera isn't supported on this device. Recording with the rear camera instead.");
         recordingStream = await initializeRearCameraRecording();
       }
     } else {

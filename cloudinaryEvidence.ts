@@ -238,7 +238,13 @@ export function registerCloudinaryEvidenceRoutes(app: Express): boolean {
       const exp = Date.now() + ttl * 60 * 1000;
       const stamp = buildStamp(capturedAt, latN, lngN);
 
-      await uploadBuffer(Buffer.from(base64, 'base64'), {
+      const rawB64 = base64.includes(',') ? base64.slice(base64.indexOf(',') + 1) : base64;
+      const shareBuf = Buffer.from(rawB64, 'base64');
+      if (shareBuf.length < 1024) {
+        return res.status(400).json({ error: 'This recording is empty or too short to share. Record a few seconds and try again.' });
+      }
+
+      await uploadBuffer(shareBuf, {
         // Cloudinary stores audio under the "video" resource type.
         resource_type: kind === 'image' ? 'image' : 'video',
         type: 'authenticated',
@@ -258,13 +264,13 @@ export function registerCloudinaryEvidenceRoutes(app: Express): boolean {
         facesBlurred: kind === 'image' && blurFaces === true,
       });
     } catch (error: any) {
-      console.error('Error in evidence share:', error);
+      console.error('Error in evidence share:', error?.http_code, error?.message, error);
       return res.status(500).json({ error: error?.message || 'Share copy failed' });
     }
   });
 
   // Token-gated delivery: verify, then redirect to a freshly signed Cloudinary URL.
-  app.get('/e/:token', (req, res) => {
+  app.get('/e/:token', async (req, res) => {
     const p = verifyToken(req.params.token);
     if (!p) return res.status(410).send('This evidence link is invalid or has expired.');
 
@@ -289,18 +295,43 @@ export function registerCloudinaryEvidenceRoutes(app: Express): boolean {
       transformation.push({ quality: 'auto' });
     }
 
-    const url = cloudinary.url(publicId, {
-      resource_type: rt,
-      type: 'authenticated',
-      sign_url: true,
-      secure: true,
-      transformation,
-      ...(p.k === 'image' ? { fetch_format: 'auto' } : {}),
-      ...(wantThumb ? { format: 'jpg', start_offset: '0' } : p.k === 'video' ? { format: 'mp4' } : {}),
-    });
+    const signed = (extra: Record<string, unknown>) =>
+      cloudinary.url(publicId, { resource_type: rt, type: 'authenticated', sign_url: true, secure: true, ...extra });
+
+    // Preferred URL first, then progressively simpler ones. Audio/video are
+    // converted to mp3/mp4 so they play on iPhone/Safari and in WhatsApp.
+    const candidates: string[] = [
+      signed({
+        transformation,
+        ...(p.k === 'image' ? { fetch_format: 'auto' } : {}),
+        ...(wantThumb ? { format: 'jpg', start_offset: '0' } : p.k === 'video' ? { format: 'mp4' } : p.k === 'audio' ? { format: 'mp3' } : {}),
+      }),
+    ];
+    if (!wantThumb && p.k === 'video') candidates.push(signed({ format: 'mp4' })); // no overlay
+    if (!wantThumb && p.k === 'audio') candidates.push(signed({})); // original format
+    if (!wantThumb && p.k === 'video') candidates.push(signed({})); // original format
+
+    let chosen = candidates[0];
+    if (typeof fetch === 'function' && candidates.length > 1) {
+      for (const url of candidates) {
+        try {
+          const r = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(20000) });
+          // 423 = Cloudinary is still generating the derived file; it will work shortly.
+          if (r.ok || r.status === 423) {
+            chosen = url;
+            break;
+          }
+          console.warn('[share] delivery URL rejected', r.status, r.headers.get('x-cld-error'));
+        } catch (e) {
+          // Timeout/network: keep the preferred URL and let the browser try.
+          console.warn('[share] delivery probe failed', e);
+          break;
+        }
+      }
+    }
 
     res.set('Cache-Control', 'no-store');
-    return res.redirect(302, url);
+    return res.redirect(302, chosen);
   });
 
   console.log('[cloudinary] Evidence vault + share-copy routes registered.');
