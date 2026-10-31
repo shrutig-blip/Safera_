@@ -35,6 +35,7 @@ function uploadEncryptedToCloudinary(buffer: Buffer, id: string, context: Record
 }
 
 const app = express();
+app.set('trust proxy', 1); // behind Render's proxy: use the real client IP for rate limits
 
 // Render sits behind a reverse proxy. Without this, req.ip is the proxy's IP for
 // every visitor, so autoAlert's per-IP rate limit (5 per 10 min) is shared by ALL

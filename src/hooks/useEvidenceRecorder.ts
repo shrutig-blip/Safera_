@@ -36,6 +36,11 @@ export interface EvidenceRecorderState {
   stopRecording: () => Promise<void>;
   /** Safely attaches the active preview stream to any video element */
   attachPreview: (element: HTMLVideoElement | null) => void;
+  /**
+   * Returns what has been recorded SO FAR as a playable Blob without stopping the recording
+   * (null if nothing is recording yet). Used to auto-share SOS evidence while it is still running.
+   */
+  getLiveSnapshot?: () => Blob | null;
 }
 
 // In-memory session cache: detect once, do not repeatedly attempt unsupported front camera
@@ -797,6 +802,12 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     }
   };
 
+  const getLiveSnapshot = (): Blob | null => {
+    const rec = mediaRecorderRef.current;
+    if (!rec || rec.state !== 'recording' || recordedChunksRef.current.length === 0) return null;
+    return new Blob([...recordedChunksRef.current], { type: rec.mimeType || 'video/webm' });
+  };
+
   return {
     videoRef,
     activePreviewStream,
@@ -816,5 +827,6 @@ export function useEvidenceRecorder(onSaved: (item: EvidenceItem) => void): Evid
     startRecording,
     stopRecording,
     attachPreview,
+    getLiveSnapshot,
   };
 }

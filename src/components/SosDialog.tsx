@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { shareSosEvidenceSnapshot } from '../lib/sosEvidenceLink';
 import { EmergencyContact } from '../types';
 import { EvidenceRecorderState } from '../hooks/useEvidenceRecorder';
 import { GuardIaLogo } from './GuardIaLogo';
@@ -66,6 +67,17 @@ export const SosDialog: React.FC<SosDialogProps> = ({
   const [alertDelivery, setAlertDelivery] = useState<{ status: 'sending' | 'sent' | 'failed'; message: string } | null>(null);
   const alertRequestStarted = useRef(false);
   const autoDispatchStarted = useRef(false);
+
+  // Automatic evidence-link updates (first one 10 s after the alert, then 10 s after each finishes, max 6).
+  const EVIDENCE_FIRST_SEC = 10;
+  const EVIDENCE_EVERY_SEC = 10;
+  const EVIDENCE_MAX_UPDATES = 6;
+  const [evidenceStatus, setEvidenceStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const latest = useRef<{ recorder?: EvidenceRecorderState; contacts: typeof contacts; coords: SosCoords | null }>({
+    recorder,
+    contacts,
+    coords: null,
+  });
 
   // Real dispatch data — populated as soon as dispatch starts, so it's
   // ready by the time the cancel countdown finishes.
@@ -182,9 +194,72 @@ export const SosDialog: React.FC<SosDialogProps> = ({
       });
   }, [dispatchStage, locationPending, contacts, coords, liveSessionId, liveUrl]);
 
+  // Keep the newest values available to the long-running evidence timer below.
+  useEffect(() => {
+    latest.current = { recorder, contacts, coords };
+  });
+
+  // After the automatic alert went out, keep sharing what has been recorded so far:
+  // upload a playable copy to Cloudinary, let the server verify the link, then text it.
+  useEffect(() => {
+    if (dispatchStage !== 'dispatched' || alertDelivery?.status !== 'sent') return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let part = 0;
+
+    const run = async () => {
+      if (cancelled) return;
+      const { recorder: rec, contacts: cs, coords: c } = latest.current;
+      const blob = rec?.getLiveSnapshot?.();
+      if (!rec || !blob) return; // recording was stopped or never started: nothing more to share
+
+      const evidenceContacts = cs
+        .map((contact) => {
+          const phone = contact.sendSms && contact.phone?.trim() ? toE164(contact.phone) : undefined;
+          return {
+            name: contact.name,
+            phone: phone && /^\+[1-9]\d{7,14}$/.test(phone) ? phone : undefined,
+            telegramChatId: contact.telegramChatId?.trim() || undefined,
+          };
+        })
+        .filter((contact) => contact.phone || contact.telegramChatId);
+      if (evidenceContacts.length === 0) return;
+
+      part += 1;
+      setEvidenceStatus({ ok: true, message: `Uploading evidence recording (update ${part})…` });
+      try {
+        const out = await shareSosEvidenceSnapshot({
+          blob,
+          kind: rec.recordType === 'audio' ? 'audio' : 'video',
+          part,
+          coords: c ? { lat: c.lat, lng: c.lng } : null,
+          contacts: evidenceContacts,
+        });
+        if (cancelled) return;
+        setEvidenceStatus(
+          out.accessible && out.delivered > 0
+            ? { ok: true, message: `Evidence link verified and sent to your contacts (update ${part}).` }
+            : { ok: false, message: `Evidence link could not be verified${out.error ? ` (${out.error})` : ''}; it was not sent.` }
+        );
+      } catch (err: unknown) {
+        if (cancelled) return;
+        console.error('Automatic evidence share failed:', err);
+        setEvidenceStatus({ ok: false, message: `Evidence link not sent: ${err instanceof Error ? err.message : 'unknown error'}` });
+      }
+      if (!cancelled && part < EVIDENCE_MAX_UPDATES) timer = setTimeout(run, EVIDENCE_EVERY_SEC * 1000);
+    };
+
+    timer = setTimeout(run, EVIDENCE_FIRST_SEC * 1000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [dispatchStage, alertDelivery?.status]);
+
   const triggerSosDispatch = (immediate = false) => {
     alertRequestStarted.current = false;
     setAlertDelivery(null);
+    setEvidenceStatus(null);
     setCancelSeconds(5);
     setDispatchStage(immediate ? 'dispatched' : 'countdown');
     setCoords(null);
@@ -445,6 +520,15 @@ export const SosDialog: React.FC<SosDialogProps> = ({
                 }`}
               >
                 {alertDelivery.message}
+              </p>
+            )}
+
+            {evidenceStatus && (
+              <p
+                role="status"
+                className={`text-xs text-center font-semibold ${evidenceStatus.ok ? 'text-[#7B7280]' : 'text-[#A70F43]'}`}
+              >
+                {evidenceStatus.message}
               </p>
             )}
 

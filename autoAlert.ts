@@ -4,6 +4,7 @@
  * Automatic emergency messages for Safera.
  *
  *  POST /api/alert/trigger             send now (SOS, fall detected, inactivity)
+ *  POST /api/alert/evidence            verify an /e/ evidence link, then text it to contacts
  *  POST /api/alert/checkin/start       "message my contacts if I don't check in"
  *  POST /api/alert/checkin/:id/safe    I'm safe - cancel
  *  POST /api/alert/checkin/:id/extend  need more time
@@ -39,6 +40,7 @@ interface AlertInput {
   liveViewUrl?: string; // the public live-location viewer link Safera already generates
   evidenceUrl?: string; // an /e/<token> share link from cloudinaryEvidence.ts
   contacts: Contact[];
+  messageOverride?: string; // used for follow-up messages (e.g. evidence link updates)
 }
 
 export interface AlertDeps {
@@ -152,7 +154,7 @@ interface DeliveryResult {
 }
 
 export async function dispatchAlert(a: AlertInput): Promise<{ message: string; results: DeliveryResult[] }> {
-  const message = buildMessage(a);
+  const message = a.messageOverride ?? buildMessage(a);
   const ch = configuredChannels();
   const results: DeliveryResult[] = [];
   const jobs: Promise<void>[] = [];
@@ -244,6 +246,96 @@ export function registerAutoAlertRoutes(app: Express, deps: AlertDeps = {}): voi
     } catch (e: any) {
       console.error('[alert] trigger failed', e);
       return res.status(500).json({ error: e?.message || 'Alert failed' });
+    }
+  });
+
+
+  // ---------------------------------------------------- evidence link update --
+  // Called by the client after it uploaded a share copy of the (still running)
+  // SOS recording. We first VERIFY the link really opens (follows the redirect
+  // to Cloudinary and checks for a media content-type) and only then text it.
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const isOwnEvidenceLink = (raw: string, req: Request): URL | null => {
+    try {
+      const u = new URL(raw);
+      if (!/^https?:$/.test(u.protocol) || !u.pathname.startsWith('/e/')) return null;
+      const own = new Set<string>([req.get('host') || '']);
+      if (process.env.PUBLIC_BASE_URL) own.add(new URL(process.env.PUBLIC_BASE_URL).host);
+      return own.has(u.host) ? u : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const verifyLink = async (url: string) => {
+    let last = { ok: false, status: 0, contentType: '', error: '' as string };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const r = await fetch(url, {
+          headers: { Range: 'bytes=0-2047' },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(20000),
+        });
+        const contentType = r.headers.get('content-type') || '';
+        const mediaOk = /^(video|audio|image)\//i.test(contentType);
+        last = { ok: (r.status === 200 || r.status === 206) && mediaOk, status: r.status, contentType, error: '' };
+        await r.body?.cancel().catch(() => {});
+        if (last.ok) return { ...last, attempts: attempt };
+        console.warn('[alert:evidence] link not ready', r.status, contentType, r.headers.get('x-cld-error'));
+      } catch (e: any) {
+        last = { ok: false, status: 0, contentType: '', error: e?.message || 'request failed' };
+        console.warn('[alert:evidence] link check failed', last.error);
+      }
+      if (attempt < 3) await sleep(3000);
+    }
+    return { ...last, attempts: 3 };
+  };
+
+  app.post('/api/alert/evidence', async (req: Request, res: Response) => {
+    if (rateLimited(req, 'evidence', 30)) return res.status(429).json({ error: 'Too many evidence updates, slow down.' });
+    const b = req.body || {};
+    const contacts = cleanContacts(b.contacts);
+    if (!contacts.length) return res.status(400).json({ error: 'At least one valid contact is required' });
+    const link = typeof b.evidenceUrl === 'string' ? isOwnEvidenceLink(b.evidenceUrl, req) : null;
+    if (!link) return res.status(400).json({ error: 'evidenceUrl must be a Safera /e/ share link' });
+
+    try {
+      const check = await verifyLink(link.toString());
+      if (!check.ok) {
+        return res.json({
+          accessible: false,
+          delivered: 0,
+          status: check.status,
+          contentType: check.contentType,
+          error: check.error || `Link check failed (HTTP ${check.status || 'n/a'})`,
+        });
+      }
+
+      const name = typeof b.name === 'string' && b.name.trim() ? b.name.trim().slice(0, 60) : 'A Safera user';
+      const part = Math.min(Math.max(Number(b.part) || 1, 1), 99);
+      const lines = [`SAFERA UPDATE: live evidence recording from ${name} (update ${part}).`, `Watch/listen: ${link.toString()}`];
+      if (typeof b.lat === 'number' && typeof b.lng === 'number') {
+        lines.push(`Last location: https://maps.google.com/?q=${b.lat},${b.lng}`);
+      }
+      lines.push('This link is checked and works for 24 hours. If you cannot reach them, call 112.');
+
+      const out = await dispatchAlert({
+        name,
+        reason: 'sos',
+        contacts,
+        messageOverride: lines.join('\n'),
+      });
+      return res.json({
+        accessible: true,
+        status: check.status,
+        contentType: check.contentType,
+        delivered: out.results.filter((r) => r.ok).length,
+        results: out.results,
+      });
+    } catch (e: any) {
+      console.error('[alert] evidence update failed', e);
+      return res.status(500).json({ error: e?.message || 'Evidence update failed' });
     }
   });
 
